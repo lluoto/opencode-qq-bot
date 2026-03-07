@@ -14,7 +14,16 @@
 </div>
 
 ---
+
 龙虾都能用了,那opencode也要接上
+
+<div align="center">
+<img width="400" src="./images/photo_2026-03-07_22-52-48.jpg" />
+<img width="400" src="./images/photo_2026-03-07_22-52-48 (2).jpg" />
+<img width="400" src="./images/photo_2026-03-07_22-52-49.jpg" />
+</div>
+
+---
 
 ## 功能特性
 
