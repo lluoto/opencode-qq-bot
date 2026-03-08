@@ -23,7 +23,7 @@
     "url": "https://github.com/gbwssve/opencode-qq-bot"
   },
   "dependencies": {
-    "@opencode-ai/sdk": "^1.2.20",
+    "@opencode-ai/sdk": "^1.2.21",
     "ws": "^8.18.0"
   },
   "devDependencies": {
