@@ -1,11 +1,9 @@
-// @input:  ./config, ./qq/* (types, api, sender), ./opencode/* (client, events, sessions), ./commands
-// @output: createBridge
-// @pos:    根层 - 核心桥接: QQ 消息 -> OpenCode -> QQ 回复
 import type { Config } from "./config.js"
 import type { MessageContext } from "./qq/types.js"
 import { getAccessToken } from "./qq/api.js"
 import { replyToQQ } from "./qq/sender.js"
 import type { OpencodeClient } from "./opencode/client.js"
+import { promptAsync } from "./opencode/adapter.js"
 import { EventRouter } from "./opencode/events.js"
 import { SessionManager } from "./opencode/sessions.js"
 import type { Event } from "@opencode-ai/sdk"
@@ -22,14 +20,6 @@ const RESPONSE_TIMEOUT_MS = 5 * 60 * 1000
 
 interface Bridge {
   handleMessage: (ctx: MessageContext) => Promise<void>
-}
-
-interface PromptOptions {
-  model?: {
-    providerID: string
-    modelID: string
-  }
-  agent?: string
 }
 
 export function createBridge(
@@ -87,9 +77,18 @@ export function createBridge(
 
       try {
         const session = await sessions.getOrCreate(ctx.userId)
-        const promptOptions = buildPromptOptions(ctx.userId, sessions)
+        const model = sessions.getModel(ctx.userId)
+        const agent = sessions.getAgent(ctx.userId)
+
         const replyText = await waitForSessionReply(router, session.sessionId, () => {
-          void startSessionPrompt(client, session.sessionId, content, promptOptions)
+          void promptAsync(client, {
+            sessionId: session.sessionId,
+            text: content,
+            model: model.providerId && model.modelId
+              ? { providerID: model.providerId, modelID: model.modelId }
+              : undefined,
+            agent,
+          })
         })
 
         if (replyText.trim()) {
@@ -144,19 +143,7 @@ function isAllowedUser(userId: string, allowedUsers: string[]): boolean {
   return allowedUsers.length === 0 || allowedUsers.includes(userId)
 }
 
-function buildPromptOptions(userId: string, sessions: SessionManager): PromptOptions {
-  const model = sessions.getModel(userId)
-  const agent = sessions.getAgent(userId)
-
-  return {
-    model: model.providerId && model.modelId
-      ? { providerID: model.providerId, modelID: model.modelId }
-      : undefined,
-    agent,
-  }
-}
-
-async function waitForSessionReply(
+function waitForSessionReply(
   router: EventRouter,
   sessionId: string,
   startPrompt: () => void,
@@ -205,49 +192,6 @@ async function waitForSessionReply(
       finish(() => reject(error instanceof Error ? error : new Error(String(error))))
     }
   })
-}
-
-async function startSessionPrompt(
-  client: OpencodeClient,
-  sessionId: string,
-  text: string,
-  options: PromptOptions,
-): Promise<void> {
-  const body: {
-    parts: Array<{ type: "text"; text: string }>
-    model?: { providerID: string; modelID: string }
-    agent?: string
-  } = {
-    parts: [{ type: "text", text }],
-  }
-
-  if (options.model) {
-    body.model = options.model
-  }
-  if (options.agent) {
-    body.agent = options.agent
-  }
-
-  const sessionApi = client.session
-  const promptMethod = Reflect.get(sessionApi, "prompt")
-  if (typeof promptMethod === "function") {
-    await Promise.resolve(promptMethod.call(sessionApi, {
-      path: { id: sessionId },
-      body,
-    }))
-    return
-  }
-
-  const chatMethod = Reflect.get(sessionApi, "chat")
-  if (typeof chatMethod === "function") {
-    await Promise.resolve(chatMethod.call(sessionApi, {
-      path: { id: sessionId },
-      body,
-    }))
-    return
-  }
-
-  throw new Error("OpenCode SDK 不支持 session.prompt/chat")
 }
 
 function toErrorMessage(error: unknown): string {

@@ -9,7 +9,6 @@ export type EventCallback = (event: Event) => void
 export class EventRouter {
   private listeners = new Map<string, EventCallback>()
   private running = false
-  private abortController: AbortController | null = null
   private client: OpencodeClient
 
   constructor(client: OpencodeClient) {
@@ -24,8 +23,6 @@ export class EventRouter {
 
   stop(): void {
     this.running = false
-    this.abortController?.abort()
-    this.abortController = null
   }
 
   register(sessionId: string, callback: EventCallback): void {
@@ -39,7 +36,6 @@ export class EventRouter {
   private async consume(): Promise<void> {
     while (this.running) {
       try {
-        this.abortController = new AbortController()
         const result = await this.client.event.subscribe()
 
         for await (const event of result.stream) {
@@ -50,6 +46,8 @@ export class EventRouter {
             if (cb) cb(event)
           }
         }
+        // 成功消费流后重置重连延迟
+        this.resetBackoff()
       } catch (err) {
         if (!this.running) break
         const msg = err instanceof Error ? err.message : String(err)

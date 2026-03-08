@@ -1,10 +1,14 @@
-// @input:  ./config, ./qq/types, ./opencode/* (client, sessions)
-// @output: isCommand, handleCommand, handlePendingSelection, CommandContext, PendingSelection
-// @pos:    根层 - 命令系统: /new /stop /status /sessions /help /model /agent /rename
 import type { Config } from "./config.js"
 import type { MessageContext } from "./qq/types.js"
 import type { OpencodeClient } from "./opencode/client.js"
 import { SessionManager } from "./opencode/sessions.js"
+import {
+  abortSession,
+  listProviderModels,
+  listAgents as adapterListAgents,
+  updateSessionTitle,
+  healthCheck,
+} from "./opencode/adapter.js"
 
 const SELECTION_TTL_MS = 60_000
 
@@ -27,23 +31,22 @@ interface ParsedCommand {
   args: string
 }
 
-interface ListedSession {
-  id: string
-  title: string
-}
-
-interface ListedModel {
-  id: string
-  label: string
-}
-
-interface ListedAgent {
-  id: string
-  label: string
+const SHORT_ALIASES: Record<string, string> = {
+  nw: "new",
+  st: "stop",
+  ss: "status",
+  sn: "sessions",
+  hp: "help",
+  md: "model",
+  ag: "agent",
+  rn: "rename",
 }
 
 export function isCommand(content: string): boolean {
-  return content.trim().startsWith("/")
+  const trimmed = content.trim()
+  if (trimmed.startsWith("/")) return true
+  const firstToken = trimmed.split(/\s+/)[0]?.toLowerCase()
+  return firstToken !== undefined && firstToken in SHORT_ALIASES
 }
 
 export async function handleCommand(ctx: MessageContext, cmdCtx: CommandContext): Promise<string> {
@@ -72,7 +75,7 @@ export async function handleCommand(ctx: MessageContext, cmdCtx: CommandContext)
     case "rename":
       return handleRename(ctx, parsed.args, cmdCtx)
     default:
-      return `不支持的命令：/${parsed.name}\n发送 /help 查看可用命令`
+      return `不支持的命令：${parsed.name}\n发送 hp 或 /help 查看可用命令`
   }
 }
 
@@ -82,9 +85,7 @@ export async function handlePendingSelection(
   cmdCtx: CommandContext,
 ): Promise<string | null> {
   const pending = cmdCtx.pendingSelections.get(userId)
-  if (!pending) {
-    return null
-  }
+  if (!pending) return null
 
   if (pending.expiresAt <= Date.now()) {
     cmdCtx.pendingSelections.delete(userId)
@@ -115,20 +116,18 @@ export async function handlePendingSelection(
 
 function parseCommand(content: string): ParsedCommand | null {
   const trimmed = content.trim()
-  if (!trimmed.startsWith("/")) {
-    return null
+
+  if (trimmed.startsWith("/")) {
+    const [rawName, ...rest] = trimmed.slice(1).split(/\s+/)
+    const name = rawName?.toLowerCase()
+    if (!name) return null
+    return { name, args: rest.join(" ").trim() }
   }
 
-  const [rawName, ...rest] = trimmed.slice(1).split(/\s+/)
-  const name = rawName?.toLowerCase()
-  if (!name) {
-    return null
-  }
-
-  return {
-    name,
-    args: rest.join(" ").trim(),
-  }
+  const [firstToken, ...rest] = trimmed.split(/\s+/)
+  const alias = firstToken?.toLowerCase()
+  if (!alias || !(alias in SHORT_ALIASES)) return null
+  return { name: SHORT_ALIASES[alias], args: rest.join(" ").trim() }
 }
 
 async function handleNew(ctx: MessageContext, cmdCtx: CommandContext): Promise<string> {
@@ -146,7 +145,7 @@ async function handleStop(ctx: MessageContext, cmdCtx: CommandContext): Promise<
     return "当前还没有会话可停止"
   }
 
-  await cmdCtx.client.session.abort({ path: { id: session.sessionId } })
+  await abortSession(cmdCtx.client, session.sessionId)
   return `已发送停止请求：${session.title ?? session.sessionId}`
 }
 
@@ -155,8 +154,21 @@ async function handleStatus(ctx: MessageContext, cmdCtx: CommandContext): Promis
   const { providerId, modelId } = cmdCtx.sessions.getModel(ctx.userId)
   const agentId = cmdCtx.sessions.getAgent(ctx.userId)
 
-  const openCodeStatus = await getOpenCodeStatus(cmdCtx.client)
-  const qqStatus = await getQQStatus(cmdCtx)
+  let openCodeStatus: string
+  try {
+    await healthCheck(cmdCtx.client)
+    openCodeStatus = "运行中"
+  } catch {
+    openCodeStatus = "异常"
+  }
+
+  let qqStatus: string
+  try {
+    await cmdCtx.getAccessToken()
+    qqStatus = "正常"
+  } catch {
+    qqStatus = "异常"
+  }
 
   return [
     "OpenCode 状态",
@@ -169,7 +181,7 @@ async function handleStatus(ctx: MessageContext, cmdCtx: CommandContext): Promis
 }
 
 async function handleSessions(ctx: MessageContext, cmdCtx: CommandContext): Promise<string> {
-  const sessions = await listSessions(cmdCtx.client)
+  const sessions = cmdCtx.sessions.getUserSessions(ctx.userId)
   if (sessions.length === 0) {
     return "当前没有可切换的历史会话"
   }
@@ -177,13 +189,13 @@ async function handleSessions(ctx: MessageContext, cmdCtx: CommandContext): Prom
   const currentSessionId = cmdCtx.sessions.getSession(ctx.userId)?.sessionId
   cmdCtx.pendingSelections.set(ctx.userId, {
     type: "session",
-    items: sessions.map((session) => ({ id: session.id, label: session.title })),
+    items: sessions.map((s) => ({ id: s.id, label: s.title })),
     expiresAt: Date.now() + SELECTION_TTL_MS,
   })
 
-  const lines = sessions.map((session, index) => {
-    const prefix = session.id === currentSessionId ? "[当前] " : ""
-    return `${index + 1}. ${prefix}${session.title}`
+  const lines = sessions.map((s, index) => {
+    const prefix = s.id === currentSessionId ? "[当前] " : ""
+    return `${index + 1}. ${prefix}${s.title}`
   })
 
   return ["会话列表：", ...lines, "回复序号切换会话（60 秒内有效）"].join("\n")
@@ -191,7 +203,7 @@ async function handleSessions(ctx: MessageContext, cmdCtx: CommandContext): Prom
 
 async function handleModel(ctx: MessageContext, args: string, cmdCtx: CommandContext): Promise<string> {
   if (!args) {
-    const models = await listModels(cmdCtx.client)
+    const models = await listProviderModels(cmdCtx.client)
     if (models.length === 0) {
       return "当前没有可用模型"
     }
@@ -199,26 +211,26 @@ async function handleModel(ctx: MessageContext, args: string, cmdCtx: CommandCon
     const current = cmdCtx.sessions.getModel(ctx.userId)
     cmdCtx.pendingSelections.set(ctx.userId, {
       type: "model",
-      items: models.map((model) => ({ id: model.id, label: model.label })),
+      items: models.map((m) => ({ id: m.id, label: m.label })),
       expiresAt: Date.now() + SELECTION_TTL_MS,
     })
 
-    const lines = models.map((model, index) => {
-      const isCurrent = current.providerId && current.modelId && `${current.providerId}/${current.modelId}` === model.id
-      return `${index + 1}. ${isCurrent ? "[当前] " : ""}${model.label}`
+    const lines = models.map((m, index) => {
+      const isCurrent = current.providerId && current.modelId && `${current.providerId}/${current.modelId}` === m.id
+      return `${index + 1}. ${isCurrent ? "[当前] " : ""}${m.label}`
     })
 
-    return ["可用模型：", ...lines, "回复序号或 /model <provider/model> 切换（60 秒内有效）"].join("\n")
+    return ["可用模型：", ...lines, "回复序号或 md <provider/model> 切换（60 秒内有效）"].join("\n")
   }
 
   if (/^\d+$/.test(args)) {
     const result = await handlePendingSelection(ctx.userId, Number(args), cmdCtx)
-    return result ?? "没有待选择的模型列表，请先发送 /model"
+    return result ?? "没有待选择的模型列表，请先发送 md 或 /model"
   }
 
   const model = splitModelId(args)
   if (!model) {
-    return "模型格式不对，请使用 /model <provider/model>"
+    return "模型格式不对，请使用 md <provider/model>"
   }
 
   await ensureSession(ctx.userId, cmdCtx)
@@ -227,7 +239,7 @@ async function handleModel(ctx: MessageContext, args: string, cmdCtx: CommandCon
 }
 
 async function handleAgent(ctx: MessageContext, args: string, cmdCtx: CommandContext): Promise<string> {
-  const agents = await listAgents(cmdCtx.client)
+  const agents = await adapterListAgents(cmdCtx.client)
   if (!args) {
     if (agents.length === 0) {
       return "当前没有可用 Agent"
@@ -239,7 +251,7 @@ async function handleAgent(ctx: MessageContext, args: string, cmdCtx: CommandCon
       return `${index + 1}. ${isCurrent ? "[当前] " : ""}${agent.label}`
     })
 
-    return ["可用 Agent：", ...lines, "回复 /agent <name> 切换"].join("\n")
+    return ["可用 Agent：", ...lines, "回复 ag <name> 切换"].join("\n")
   }
 
   const normalized = args.trim().toLowerCase()
@@ -256,7 +268,7 @@ async function handleAgent(ctx: MessageContext, args: string, cmdCtx: CommandCon
 async function handleRename(ctx: MessageContext, args: string, cmdCtx: CommandContext): Promise<string> {
   const title = args.trim()
   if (!title) {
-    return "用法：/rename <新名称>"
+    return "用法：rn <新名称>"
   }
 
   const session = cmdCtx.sessions.getSession(ctx.userId)
@@ -264,7 +276,12 @@ async function handleRename(ctx: MessageContext, args: string, cmdCtx: CommandCo
     return "当前还没有会话可重命名"
   }
 
-  cmdCtx.sessions.switchSession(ctx.userId, session.sessionId, title)
+  try {
+    await updateSessionTitle(cmdCtx.client, session.sessionId, title)
+  } catch {
+    // 服务端更新失败时仍更新本地，保证用户体验
+  }
+  cmdCtx.sessions.updateSessionTitle(ctx.userId, session.sessionId, title)
   return `已重命名当前会话：${title}`
 }
 
@@ -272,150 +289,26 @@ async function ensureSession(userId: string, cmdCtx: CommandContext): Promise<vo
   await cmdCtx.sessions.getOrCreate(userId)
 }
 
-async function getOpenCodeStatus(client: OpencodeClient): Promise<string> {
-  try {
-    await client.session.list()
-    return "运行中"
-  } catch (error) {
-    return `异常（${toErrorMessage(error)}）`
-  }
-}
-
-async function getQQStatus(cmdCtx: CommandContext): Promise<string> {
-  try {
-    await cmdCtx.getAccessToken()
-    return "正常"
-  } catch (error) {
-    return `异常（${toErrorMessage(error)}）`
-  }
-}
-
-async function listSessions(client: OpencodeClient): Promise<ListedSession[]> {
-  const result = await client.session.list()
-  const rawItems = extractArray(result)
-  const items = rawItems.length > 0 ? rawItems : extractArray(extractProperty(result, "data"))
-
-  return items
-    .map((item) => {
-      const id = getString(item, "id")
-      if (!id) {
-        return null
-      }
-
-      return {
-        id,
-        title: getString(item, "title") ?? id,
-      }
-    })
-    .filter((item): item is ListedSession => item !== null)
-}
-
-async function listModels(client: OpencodeClient): Promise<ListedModel[]> {
-  const configApi = extractProperty(client, "config")
-  const providersFn = typeof configApi === "object" && configApi !== null ? Reflect.get(configApi, "providers") : undefined
-  const response = typeof providersFn === "function" ? await Promise.resolve(providersFn.call(configApi)) : []
-
-  const providers = extractArray(response)
-  const resolvedProviders = providers.length > 0 ? providers : extractArray(extractProperty(response, "data"))
-  const models: ListedModel[] = []
-
-  for (const provider of resolvedProviders) {
-    const providerId = getString(provider, "id") ?? getString(provider, "providerID")
-    const rawModels = extractArray(extractProperty(provider, "models"))
-    for (const model of rawModels) {
-      const modelId = getString(model, "id") ?? getString(model, "modelID")
-      if (!providerId || !modelId) {
-        continue
-      }
-      models.push({
-        id: `${providerId}/${modelId}`,
-        label: `${providerId} / ${modelId}`,
-      })
-    }
-  }
-
-  return models
-}
-
-async function listAgents(client: OpencodeClient): Promise<ListedAgent[]> {
-  const response = await client.app.agents()
-  const rawAgents = extractArray(response)
-  const agents = rawAgents.length > 0 ? rawAgents : extractArray(extractProperty(response, "data"))
-
-  return agents
-    .map((agent) => {
-      const id = getString(agent, "id") ?? getString(agent, "name")
-      if (!id) {
-        return null
-      }
-
-      const description = getString(agent, "description")
-      return {
-        id,
-        label: description ? `${id} - ${description}` : id,
-      }
-    })
-    .filter((agent): agent is ListedAgent => agent !== null)
-}
-
 function splitModelId(value: string): { providerId: string; modelId: string } | null {
   const trimmed = value.trim()
   const slashIndex = trimmed.indexOf("/")
-  if (slashIndex <= 0 || slashIndex === trimmed.length - 1) {
-    return null
-  }
-
+  if (slashIndex <= 0 || slashIndex === trimmed.length - 1) return null
   const providerId = trimmed.slice(0, slashIndex).trim()
   const modelId = trimmed.slice(slashIndex + 1).trim()
-  if (!providerId || !modelId) {
-    return null
-  }
-
+  if (!providerId || !modelId) return null
   return { providerId, modelId }
 }
 
 export function buildHelpText(): string {
   return [
-    "可用命令：",
-    "/new - 创建新会话",
-    "/stop - 停止当前 AI 运行",
-    "/status - 查看服务器和当前会话状态",
-    "/sessions - 列出历史会话并回复序号切换",
-    "/help - 查看帮助",
-    "/model - 列出可用模型",
-    "/model <provider/model> - 切换模型",
-    "/agent - 列出可用 Agent",
-    "/agent <name> - 切换 Agent",
-    "/rename <name> - 重命名当前会话",
+    "可用命令（短别名 或 /全称）：",
+    "nw | /new - 创建新会话",
+    "st | /stop - 停止当前 AI 运行",
+    "ss | /status - 查看状态",
+    "sn | /sessions - 历史会话，回复序号切换",
+    "hp | /help - 查看帮助",
+    "md | /model - 列出/切换模型",
+    "ag | /agent - 列出/切换 Agent",
+    "rn | /rename <name> - 重命名会话",
   ].join("\n")
-}
-
-function extractArray(value: unknown): Record<string, unknown>[] {
-  if (!Array.isArray(value)) {
-    return []
-  }
-  return value.filter(isRecord)
-}
-
-function extractProperty(value: unknown, key: string): unknown {
-  if (!isRecord(value)) {
-    return undefined
-  }
-  return value[key]
-}
-
-function getString(value: unknown, key: string): string | undefined {
-  if (!isRecord(value)) {
-    return undefined
-  }
-  const resolved = value[key]
-  return typeof resolved === "string" && resolved.trim() ? resolved : undefined
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null
-}
-
-function toErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
 }

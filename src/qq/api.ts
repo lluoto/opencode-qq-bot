@@ -4,6 +4,7 @@
 
 const API_BASE = "https://api.sgroup.qq.com"
 const TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken"
+const DEBUG = process.env.DEBUG_QQ_API === "true"
 
 let cachedToken: { token: string; expiresAt: number; appId: string } | null = null
 // Singleflight：防止并发获取 Token 时重复请求
@@ -19,13 +20,11 @@ export async function getAccessToken(appId: string, clientSecret: string): Promi
   }
 
   if (cachedToken && cachedToken.appId !== appId) {
-    console.log(`[qqbot-api] appId changed (${cachedToken.appId} → ${appId}), clearing token cache`)
     cachedToken = null
     tokenFetchPromise = null
   }
 
   if (tokenFetchPromise) {
-    console.log("[qqbot-api] Token fetch in progress, waiting for existing request...")
     return tokenFetchPromise
   }
 
@@ -47,9 +46,11 @@ async function doFetchToken(appId: string, clientSecret: string): Promise<string
   const requestBody = { appId, clientSecret }
   const requestHeaders = { "Content-Type": "application/json" }
 
-  console.log(`[qqbot-api] >>> POST ${TOKEN_URL}`)
-  console.log("[qqbot-api] >>> Headers:", JSON.stringify(requestHeaders, null, 2))
-  console.log("[qqbot-api] >>> Body:", JSON.stringify({ appId, clientSecret: "***" }, null, 2))
+  if (DEBUG) {
+    console.log(`[qqbot-api] >>> POST ${TOKEN_URL}`)
+    console.log("[qqbot-api] >>> Headers:", JSON.stringify(requestHeaders, null, 2))
+    console.log("[qqbot-api] >>> Body:", JSON.stringify({ appId, clientSecret: "***" }, null, 2))
+  }
 
   let response: Response
   try {
@@ -59,27 +60,24 @@ async function doFetchToken(appId: string, clientSecret: string): Promise<string
       body: JSON.stringify(requestBody),
     })
   } catch (err) {
-    console.error("[qqbot-api] <<< Network error:", err)
+    console.error("[qqbot-api] Token refresh failed (network error):", err instanceof Error ? err.message : String(err))
     throw new Error(`Network error getting access_token: ${err instanceof Error ? err.message : String(err)}`)
   }
-
-  const responseHeaders: Record<string, string> = {}
-  response.headers.forEach((value, key) => {
-    responseHeaders[key] = value
-  })
-  console.log(`[qqbot-api] <<< Status: ${response.status} ${response.statusText}`)
-  console.log("[qqbot-api] <<< Headers:", JSON.stringify(responseHeaders, null, 2))
 
   let data: { access_token?: string; expires_in?: number }
   let rawBody: string
   try {
     rawBody = await response.text()
-    const logBody = rawBody.replace(/"access_token"\s*:\s*"[^"]+"/g, '"access_token": "***"')
-    console.log("[qqbot-api] <<< Body:", logBody)
     data = JSON.parse(rawBody) as { access_token?: string; expires_in?: number }
   } catch (err) {
-    console.error("[qqbot-api] <<< Parse error:", err)
+    console.error("[qqbot-api] Token refresh failed (parse error):", err instanceof Error ? err.message : String(err))
     throw new Error(`Failed to parse access_token response: ${err instanceof Error ? err.message : String(err)}`)
+  }
+
+  if (DEBUG) {
+    const logBody = rawBody.replace(/"access_token"\s*:\s*"[^"]+"/g, '"access_token": "***"')
+    console.log(`[qqbot-api] <<< Status: ${response.status} ${response.statusText}`)
+    console.log("[qqbot-api] <<< Body:", logBody)
   }
 
   if (!data.access_token) {
@@ -92,7 +90,7 @@ async function doFetchToken(appId: string, clientSecret: string): Promise<string
     appId,
   }
 
-  console.log(`[qqbot-api] Token cached for appId=${appId}, expires at: ${new Date(cachedToken.expiresAt).toISOString()}`)
+  console.log(`[qqbot-api] Token refreshed, expires at: ${new Date(cachedToken.expiresAt).toISOString()}`)
   return cachedToken.token
 }
 
@@ -166,14 +164,19 @@ export async function apiRequest<T = unknown>(
     options.body = JSON.stringify(body)
   }
 
-  console.log(`[qqbot-api] >>> ${method} ${url} (timeout: ${timeout}ms)`)
-  console.log("[qqbot-api] >>> Headers:", JSON.stringify(headers, null, 2))
-  if (body) {
-    const logBody = { ...(body as Record<string, unknown>) }
-    if (typeof logBody.file_data === "string") {
-      logBody.file_data = `<base64 ${logBody.file_data.length} chars>`
+  const start = Date.now()
+
+  if (DEBUG) {
+    const logHeaders = { ...headers, Authorization: "QQBot ***" }
+    console.log(`[qqbot-api] >>> ${method} ${url} (timeout: ${timeout}ms)`)
+    console.log("[qqbot-api] >>> Headers:", JSON.stringify(logHeaders, null, 2))
+    if (body) {
+      const logBody = { ...(body as Record<string, unknown>) }
+      if (typeof logBody.file_data === "string") {
+        logBody.file_data = `<base64 ${logBody.file_data.length} chars>`
+      }
+      console.log("[qqbot-api] >>> Body:", JSON.stringify(logBody, null, 2))
     }
-    console.log("[qqbot-api] >>> Body:", JSON.stringify(logBody, null, 2))
   }
 
   let res: Response
@@ -182,32 +185,38 @@ export async function apiRequest<T = unknown>(
   } catch (err) {
     clearTimeout(timeoutId)
     if (err instanceof Error && err.name === "AbortError") {
-      console.error(`[qqbot-api] <<< Request timeout after ${timeout}ms`)
+      console.error(`[qqbot-api] ${method} ${path} -> TIMEOUT (${timeout}ms)`)
       throw new Error(`Request timeout [${path}]: exceeded ${timeout}ms`)
     }
-    console.error("[qqbot-api] <<< Network error:", err)
+    console.error(`[qqbot-api] ${method} ${path} -> ERROR: ${err instanceof Error ? err.message : String(err)}`)
     throw new Error(`Network error [${path}]: ${err instanceof Error ? err.message : String(err)}`)
   } finally {
     clearTimeout(timeoutId)
   }
 
-  const responseHeaders: Record<string, string> = {}
-  res.headers.forEach((value, key) => {
-    responseHeaders[key] = value
-  })
-  console.log(`[qqbot-api] <<< Status: ${res.status} ${res.statusText}`)
-  console.log("[qqbot-api] <<< Headers:", JSON.stringify(responseHeaders, null, 2))
-
   let data: T
   let rawBody: string
   try {
     rawBody = await res.text()
-    console.log("[qqbot-api] <<< Body:", rawBody)
     data = JSON.parse(rawBody) as T
   } catch (err) {
-    console.error("[qqbot-api] <<< Parse error:", err)
+    const elapsed = Date.now() - start
+    console.error(`[qqbot-api] ${method} ${path} -> ${res.status} (${elapsed}ms) - Parse error: ${err instanceof Error ? err.message : String(err)}`)
     throw new Error(`Failed to parse response [${path}]: ${err instanceof Error ? err.message : String(err)}`)
   }
+
+  if (DEBUG) {
+    const responseHeaders: Record<string, string> = {}
+    res.headers.forEach((value, key) => {
+      responseHeaders[key] = value
+    })
+    console.log(`[qqbot-api] <<< Status: ${res.status} ${res.statusText}`)
+    console.log("[qqbot-api] <<< Headers:", JSON.stringify(responseHeaders, null, 2))
+    console.log("[qqbot-api] <<< Body:", rawBody)
+  }
+
+  const elapsed = Date.now() - start
+  console.log(`[qqbot-api] ${method} ${path} -> ${res.status} (${elapsed}ms)`)
 
   if (!res.ok) {
     const error = data as { message?: string; code?: number }
