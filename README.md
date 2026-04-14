@@ -217,6 +217,8 @@ QQ 用户 @机器人 发消息
 
 ---
 
+##
+尝试强化opencode服务器，避免询问崩溃或5分钟超时
 ## 致谢
 
 - [OpenCode](https://opencode.ai) - AI 编程助手
