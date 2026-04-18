@@ -69,6 +69,9 @@ export class EventRouter {
       case "session.status":
         return event.properties.sessionID
       case "session.error":
+      case "permission.asked":
+      case "permission.updated":
+      case "permission.replied":
         return event.properties.sessionID
       case "message.removed":
         return event.properties.sessionID

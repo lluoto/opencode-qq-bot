@@ -106,6 +106,33 @@ echo "OPENCODE_BASE_URL=http://localhost:4096" >> ~/.openqq/.env
 
 首次 @机器人 或私聊时，Bot 会自动发送命令帮助。
 
+也支持使用反斜杠前缀，例如 `\sessions`。
+
+当 `/sessions` 列出历史会话后，直接回复数字会优先执行会话切换，不会再被误判成权限确认指令。
+
+---
+
+## QQ 确认与权限交互
+
+当 OpenCode 先要求人工确认时，QQ 会显示：
+
+```text
+OpenCode 需要操作确认
+Confirm you want me to ...
+回复 1 确认继续 / 3 取消
+```
+
+当 OpenCode 需要权限确认时，QQ 会显示：
+
+```text
+OpenCode 需要权限确认
+操作：...
+路径：...
+下一步：回复 1 允许一次 / 2 总是允许 / 3 拒绝
+```
+
+机器人会尽量从权限事件里提取真实操作和路径，避免出现 `undefined`。
+
 ---
 
 ## 创建 QQ 机器人

@@ -24,7 +24,7 @@ const SHORT_ALIASES: Record<string, string> = {
 
 export function isCommand(content: string): boolean {
   const trimmed = content.trim()
-  if (trimmed.startsWith("/")) return true
+  if (trimmed.startsWith("/") || trimmed.startsWith("\\")) return true
   const firstToken = trimmed.split(/\s+/)[0]?.toLowerCase()
   return firstToken !== undefined && firstToken in SHORT_ALIASES
 }
@@ -32,7 +32,7 @@ export function isCommand(content: string): boolean {
 function parseCommand(content: string): ParsedCommand | null {
   const trimmed = content.trim()
 
-  if (trimmed.startsWith("/")) {
+  if (trimmed.startsWith("/") || trimmed.startsWith("\\")) {
     const [rawName, ...rest] = trimmed.slice(1).split(/\s+/)
     const name = rawName?.toLowerCase()
     if (!name) return null
