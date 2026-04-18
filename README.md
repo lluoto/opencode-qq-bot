@@ -7,11 +7,13 @@ Chat with OpenCode AI assistant via QQ bot.
 - Connect QQ to OpenCode server
 - Send messages and get AI responses
 - Support commands: /new, /status, /sessions, /model, /agent
+- Accept both `/command` and `\command` prefixes in QQ chat
 - Auto-start embedded OpenCode server (standalone mode)
 - Or connect to existing OpenCode server (via AstrBot)
 - Load API keys from .env file
 - Forward long-task progress back to QQ
 - Forward OpenCode permission requests to QQ for approval
+- Support QQ confirmation replies before continuing sensitive actions
 
 ## Installation
 
@@ -85,6 +87,18 @@ opencode attach http://127.0.0.1:4096
 - `/agent` - List available agents
 - `/agent <name>` - Switch agent
 
+QQ also accepts the same commands with a backslash prefix, for example `\sessions`.
+
+When `/sessions` lists historical sessions, reply with the number directly and the bot will prioritize session switching before any permission or confirmation flow.
+
+## Recent Refinements
+
+- `\sessions` now works the same as `/sessions`
+- Numeric replies after `/sessions` are routed to session switching first, instead of being mistaken for permission replies
+- Repeated progress/final replies are deduplicated to reduce QQ spam on long-running tasks
+- If an assistant asks for confirmation first, QQ now shows an explicit confirmation prompt and supports `1` to continue or `3` to cancel
+- Permission prompts now use more resilient field extraction so QQ can show the real operation/path and the exact next step
+
 ## Permission Approval From QQ
 
 When OpenCode needs a permission decision during a tool call, the bot will send a QQ prompt like:
@@ -93,7 +107,7 @@ When OpenCode needs a permission decision during a tool call, the bot will send 
 OpenCode 需要权限确认
 操作：...
 路径：...
-回复 1 允许一次 / 2 总是允许 / 3 拒绝
+下一步：回复 1 允许一次 / 2 总是允许 / 3 拒绝
 ```
 
 Reply in QQ with:
@@ -103,6 +117,14 @@ Reply in QQ with:
 - `3` = reject
 
 This avoids headless tasks hanging invisibly on permission prompts.
+
+If OpenCode asks for an explicit confirmation before the permission step, QQ will show:
+
+```text
+OpenCode 需要操作确认
+Confirm you want me to ...
+回复 1 确认继续 / 3 取消
+```
 
 ## Long Tasks
 

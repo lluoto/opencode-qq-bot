@@ -108,6 +108,7 @@ export class EventRouter {
       case "session.compacted":
       case "session.status":
       case "session.error":
+      case "permission.asked":
       case "permission.updated":
       case "permission.replied":
       case "message.removed":

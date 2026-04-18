@@ -41,6 +41,12 @@ interface PendingPermissionRequest {
   expiresAt: number
 }
 
+interface PendingConfirmationRequest {
+  sessionId: string
+  prompt: string
+  expiresAt: number
+}
+
 export function createBridge(
   config: Config,
   client: OpencodeClient,
@@ -51,6 +57,7 @@ export function createBridge(
   const greeted = new Set<string>()
   const pendingSelections = new Map<string, PendingSelection>()
   const pendingPermissions = new Map<string, PendingPermissionRequest>()
+  const pendingConfirmations = new Map<string, PendingConfirmationRequest>()
   const processedMessages = new Map<string, number>()
   const commandContext: CommandContext = {
     config,
@@ -79,12 +86,6 @@ export function createBridge(
         return
       }
 
-      const permissionReply = await maybeHandlePendingPermission(ctx, client, pendingPermissions)
-      if (permissionReply !== null) {
-        await sendReply(ctx, permissionReply)
-        return
-      }
-
       if (!greeted.has(ctx.userId)) {
         greeted.add(ctx.userId)
         await sendReply(ctx, buildHelpText())
@@ -99,6 +100,31 @@ export function createBridge(
       const pendingReply = await maybeHandlePendingSelection(ctx, commandContext)
       if (pendingReply !== null) {
         await sendReply(ctx, pendingReply)
+        return
+      }
+
+      const permissionReply = await maybeHandlePendingPermission(ctx, client, pendingPermissions)
+      if (permissionReply !== null) {
+        await sendReply(ctx, permissionReply)
+        return
+      }
+
+      const confirmationReply = await maybeHandlePendingConfirmation(
+        ctx,
+        client,
+        router,
+        sessions,
+        busyUsers,
+        pendingConfirmations,
+        sendReply,
+      )
+      if (confirmationReply !== null) {
+        await sendReply(ctx, confirmationReply)
+        return
+      }
+
+      if (looksLikePermissionResponse(content)) {
+        await sendReply(ctx, "当前没有待确认的权限请求。若要测试权限流程，请先 /new 后再发送目标操作。")
         return
       }
 
@@ -117,20 +143,46 @@ export function createBridge(
           void sendReply(ctx, "正在处理中，完成后继续回复，请稍候。")
         }, 2000)
 
-        const session = await sessions.getOrCreate(ctx.userId)
+        let session = await sessions.getOrCreate(ctx.userId)
         const promptOptions = buildPromptOptions(ctx.userId, sessions)
-        const replyText = await waitForSessionReply(client, router, session.sessionId, () => {
-          void startSessionPrompt(client, session.sessionId, content, promptOptions)
-        }, async (progressText) => {
-          await sendReply(ctx, progressText)
-        }, async (permission) => {
-          pendingPermissions.set(ctx.userId, permission)
-          await sendReply(ctx, formatPermissionRequest(permission))
-        })
+
+        const runOnce = async (sessionId: string): Promise<string> => {
+          return waitForSessionReply(client, router, sessionId, () => {
+            return startSessionPrompt(client, sessionId, content, promptOptions)
+          }, async (progressText) => {
+            await sendReply(ctx, progressText)
+          }, async (permission) => {
+            pendingPermissions.set(ctx.userId, permission)
+            await sendReply(ctx, formatPermissionRequest(permission))
+          })
+        }
+
+        let replyText: string
+        try {
+          replyText = await runOnce(session.sessionId)
+        } catch (error) {
+          if (isSessionNotFoundError(error)) {
+            console.log("[bridge] Session missing, creating a fresh one:", session.sessionId)
+            session = await sessions.createNew(ctx.userId)
+            replyText = await runOnce(session.sessionId)
+          } else {
+            throw error
+          }
+        }
         clearTimeout(processingTimer)
         processingTimer = null
 
         if (replyText.trim()) {
+          if (looksLikeConfirmationPrompt(replyText)) {
+            console.log("[bridge] storing pending confirmation for user:", ctx.userId)
+            pendingConfirmations.set(ctx.userId, {
+              sessionId: session.sessionId,
+              prompt: replyText,
+              expiresAt: Date.now() + 10 * 60 * 1000,
+            })
+            await sendReply(ctx, formatConfirmationRequest(replyText))
+            return
+          }
           await sendReply(ctx, replyText)
         } else if (!sentProcessingReply) {
           await sendReply(ctx, "(AI 未返回内容)")
@@ -221,13 +273,80 @@ async function maybeHandlePendingPermission(
   })
   pendingPermissions.delete(ctx.userId)
 
+  const permissionLabel = pending.title || formatPermissionPattern(pending.pattern)
+
   if (response === "reject") {
-    return `已拒绝权限请求：${pending.title}`
+    return `已拒绝权限请求：${permissionLabel}`
   }
   if (response === "always") {
-    return `已永久允许：${pending.title}`
+    return `已永久允许：${permissionLabel}`
   }
-  return `已允许一次：${pending.title}`
+  return `已允许一次：${permissionLabel}`
+}
+
+async function maybeHandlePendingConfirmation(
+  ctx: MessageContext,
+  client: OpencodeClient,
+  router: EventRouter,
+  sessions: SessionManager,
+  busyUsers: Set<string>,
+  pendingConfirmations: Map<string, PendingConfirmationRequest>,
+  sendReply: (ctx: MessageContext, text: string) => Promise<void>,
+): Promise<string | null> {
+  const pending = pendingConfirmations.get(ctx.userId)
+  if (!pending) {
+    return null
+  }
+
+  if (pending.expiresAt <= Date.now()) {
+    console.log("[bridge] pending confirmation expired for user:", ctx.userId)
+    pendingConfirmations.delete(ctx.userId)
+    return "确认请求已过期，请重新发送任务"
+  }
+
+  const response = parseConfirmationResponse(ctx.content)
+  if (!response) {
+    console.log("[bridge] non-confirmation reply, clearing pending confirmation for user:", ctx.userId)
+    pendingConfirmations.delete(ctx.userId)
+    return null
+  }
+
+  console.log("[bridge] confirmation reply received:", response, "user:", ctx.userId)
+  pendingConfirmations.delete(ctx.userId)
+  if (response === "reject") {
+    return "已取消本次操作"
+  }
+
+  if (busyUsers.has(ctx.userId)) {
+    return "上一条消息还在处理中，请稍候再试"
+  }
+
+  busyUsers.add(ctx.userId)
+  try {
+    let sentProcessingReply = false
+    const processingTimer = setTimeout(() => {
+      sentProcessingReply = true
+      void sendReply(ctx, "正在处理中，完成后继续回复，请稍候。")
+    }, 2000)
+
+    const promptOptions = buildPromptOptions(ctx.userId, sessions)
+    const replyText = await waitForSessionReply(client, router, pending.sessionId, () => {
+      return startSessionPrompt(client, pending.sessionId, "Yes, confirm. Proceed exactly as previously requested, and do not use any other path.", promptOptions)
+    }, async (progressText) => {
+      await sendReply(ctx, progressText)
+    })
+
+    clearTimeout(processingTimer)
+    if (replyText.trim()) {
+      return replyText
+    }
+    if (!sentProcessingReply) {
+      return "(AI 未返回内容)"
+    }
+    return ""
+  } finally {
+    busyUsers.delete(ctx.userId)
+  }
 }
 
 function parsePermissionResponse(content: string): "once" | "always" | "reject" | null {
@@ -244,16 +363,58 @@ function parsePermissionResponse(content: string): "once" | "always" | "reject" 
   return null
 }
 
+function looksLikePermissionResponse(content: string): boolean {
+  return parsePermissionResponse(content) !== null
+}
+
+function parseConfirmationResponse(content: string): "confirm" | "reject" | null {
+  const normalized = content.trim().toLowerCase()
+  if (["1", "yes", "y", "confirm", "ok", "是", "确认", "继续"].includes(normalized)) {
+    return "confirm"
+  }
+  if (["3", "no", "n", "reject", "cancel", "否", "取消", "拒绝"].includes(normalized)) {
+    return "reject"
+  }
+  return null
+}
+
+function looksLikeConfirmationPrompt(content: string): boolean {
+  const normalized = content.trim().toLowerCase()
+  return normalized.startsWith("confirm you want me") || normalized.includes("请确认") || normalized.includes("确认你要我")
+}
+
 function formatPermissionRequest(permission: PendingPermissionRequest): string {
-  const pattern = Array.isArray(permission.pattern)
-    ? permission.pattern.join(", ")
-    : permission.pattern ?? "(未提供路径)"
+  const title = permission.title || inferPermissionTitle(permission.pattern)
+  const pattern = formatPermissionPattern(permission.pattern)
 
   return [
     "OpenCode 需要权限确认",
-    `操作：${permission.title}`,
+    `操作：${title}`,
     `路径：${pattern}`,
-    "回复 1 允许一次 / 2 总是允许 / 3 拒绝",
+    "下一步：回复 1 允许一次 / 2 总是允许 / 3 拒绝",
+  ].join("\n")
+}
+
+function inferPermissionTitle(pattern?: string | string[]): string {
+  const formatted = formatPermissionPattern(pattern)
+  if (formatted === "(未提供路径)") {
+    return "需要额外权限的操作"
+  }
+  return "访问指定路径"
+}
+
+function formatPermissionPattern(pattern?: string | string[]): string {
+  if (Array.isArray(pattern)) {
+    return pattern.length > 0 ? pattern.join(", ") : "(未提供路径)"
+  }
+  return pattern || "(未提供路径)"
+}
+
+function formatConfirmationRequest(prompt: string): string {
+  return [
+    "OpenCode 需要操作确认",
+    prompt,
+    "回复 1 确认继续 / 3 取消",
   ].join("\n")
 }
 
@@ -283,6 +444,7 @@ async function waitForSessionReply(
 ): Promise<string> {
   let settled = false
   let latestText = ""
+  let lastForwardedProgressText = ""
   let events: any[] = []
   let assistantMessageId = ""
   let connectRetryCount = 0
@@ -336,6 +498,7 @@ async function waitForSessionReply(
           const canPushProgress = now - lastProgressAt >= 15000
           if (onProgress && hasMeaningfulDelta && canPushProgress) {
             lastProgressText = latestText
+            lastForwardedProgressText = latestText
             lastProgressAt = now
             void onProgress(`${latestText}\n\n[处理中，任务仍在继续...]`).catch((error) => {
               console.error("[bridge] failed to send progress reply:", error)
@@ -361,14 +524,15 @@ async function waitForSessionReply(
         return
       }
 
-      if (event.type === "permission.updated") {
+      if (event.type === "permission.asked" || event.type === "permission.updated") {
         const permission = event.properties as any
+        const extracted = extractPermissionDetails(permission)
         if (onPermission) {
           void onPermission({
-            sessionId: permission.sessionID,
-            permissionId: permission.id,
-            title: permission.title,
-            pattern: permission.pattern,
+            sessionId: permission.sessionID ?? permission.sessionId ?? sessionId,
+            permissionId: permission.id ?? permission.permissionID ?? permission.permissionId,
+            title: extracted.title,
+            pattern: extracted.pattern,
             expiresAt: Date.now() + 10 * 60 * 1000,
           }).catch((error) => {
             console.error("[bridge] failed to send permission request:", error)
@@ -379,7 +543,8 @@ async function waitForSessionReply(
 
       if (event.type === "session.idle") {
         console.log("[bridge] Session idle received!")
-        finish(() => resolve(latestText || "(AI 未返回内容)"))
+        const finalText = latestText === lastForwardedProgressText ? "" : (latestText || "(AI 未返回内容)")
+        finish(() => resolve(finalText))
         return
       }
 
@@ -389,13 +554,15 @@ async function waitForSessionReply(
       }
     })
 
-    try {
-      startPrompt()
-      console.log("[bridge] Prompt started for session:", sessionId)
-    } catch (error) {
-      console.error("[bridge] startPrompt threw:", error)
-      finish(() => reject(error instanceof Error ? error : new Error(String(error))))
-    }
+    Promise.resolve()
+      .then(() => startPrompt())
+      .then(() => {
+        console.log("[bridge] Prompt started for session:", sessionId)
+      })
+      .catch((error) => {
+        console.error("[bridge] startPrompt threw:", error)
+        finish(() => reject(error instanceof Error ? error : new Error(String(error))))
+      })
   })
 }
 
@@ -412,14 +579,7 @@ async function startSessionPrompt(
   } = {
     parts: [{
       type: "text",
-      text: [
-        "Execution constraints:",
-        "- Use only the current workspace or C:\\Users\\lluoto\\.local\\share\\opencode\\tool-output for temporary local files.",
-        "- Do not create or modify temporary files under C:\\code or any other external local directory.",
-        "- If a local temporary helper file is needed, place it under C:\\Users\\lluoto\\.local\\share\\opencode\\tool-output.",
-        "",
-        text,
-      ].join("\n"),
+      text,
     }],
   }
 
@@ -456,6 +616,11 @@ function toErrorMessage(error: unknown): string {
   return String(error)
 }
 
+function isSessionNotFoundError(error: unknown): boolean {
+  const message = toErrorMessage(error)
+  return /session not found/i.test(message)
+}
+
 async function abortSession(client: OpencodeClient, sessionId: string): Promise<void> {
   try {
     await client.session.abort({ path: { id: sessionId } })
@@ -463,4 +628,22 @@ async function abortSession(client: OpencodeClient, sessionId: string): Promise<
   } catch (error) {
     console.error("[bridge] Failed to abort session:", sessionId, error)
   }
+}
+
+function extractPermissionDetails(permission: any): { title: string; pattern?: string | string[] } {
+  const pattern = permission.pattern
+    ?? permission.path
+    ?? permission.paths
+    ?? permission.file
+    ?? permission.files
+    ?? permission.args?.pattern
+    ?? permission.args?.path
+    ?? permission.args?.paths
+
+  const title = permission.title
+    ?? permission.permission
+    ?? permission.name
+    ?? inferPermissionTitle(pattern)
+
+  return { title, pattern }
 }

@@ -7,6 +7,7 @@ import type { OpencodeClient } from "./opencode/client.js"
 import { SessionManager } from "./opencode/sessions.js"
 
 const SELECTION_TTL_MS = 60_000
+const COMMAND_PREFIX_RE = /^[\\/]/
 
 export interface CommandContext {
   config: Config
@@ -43,7 +44,7 @@ interface ListedAgent {
 }
 
 export function isCommand(content: string): boolean {
-  return content.trim().startsWith("/")
+  return COMMAND_PREFIX_RE.test(content.trim())
 }
 
 export async function handleCommand(ctx: MessageContext, cmdCtx: CommandContext): Promise<string> {
@@ -115,7 +116,7 @@ export async function handlePendingSelection(
 
 function parseCommand(content: string): ParsedCommand | null {
   const trimmed = content.trim()
-  if (!trimmed.startsWith("/")) {
+  if (!COMMAND_PREFIX_RE.test(trimmed)) {
     return null
   }
 
