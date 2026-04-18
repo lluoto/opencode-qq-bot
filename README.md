@@ -10,6 +10,8 @@ Chat with OpenCode AI assistant via QQ bot.
 - Auto-start embedded OpenCode server (standalone mode)
 - Or connect to existing OpenCode server (via AstrBot)
 - Load API keys from .env file
+- Forward long-task progress back to QQ
+- Forward OpenCode permission requests to QQ for approval
 
 ## Installation
 
@@ -45,6 +47,8 @@ Create `~/.openqq/.env` file:
 QQ_APP_ID=your_app_id
 QQ_APP_SECRET=your_app_secret
 QQ_SANDBOX=false
+OPENCODE_TUI_ATTACH_URL=http://127.0.0.1:4096
+OPENCODE_LOCAL_TOOL_DIR=C:\Users\your_user\.local\share\opencode\tool-output
 ALLOWED_USERS=
 MAX_REPLY_LENGTH=3000
 
@@ -65,6 +69,9 @@ bun run src/index.ts
 
 # For external server (AstrBot), ensure AstrBot is running first
 # Then bot will connect to localhost:4096
+
+# To watch the same headless backend in TUI
+opencode attach http://127.0.0.1:4096
 ```
 
 ## Commands
@@ -77,6 +84,32 @@ bun run src/index.ts
 - `/model <provider/model>` - Switch model
 - `/agent` - List available agents
 - `/agent <name>` - Switch agent
+
+## Permission Approval From QQ
+
+When OpenCode needs a permission decision during a tool call, the bot will send a QQ prompt like:
+
+```text
+OpenCode 需要权限确认
+操作：...
+路径：...
+回复 1 允许一次 / 2 总是允许 / 3 拒绝
+```
+
+Reply in QQ with:
+
+- `1` = allow once
+- `2` = always allow
+- `3` = reject
+
+This avoids headless tasks hanging invisibly on permission prompts.
+
+## Long Tasks
+
+- The bot sends `正在处理中...` after 2s
+- For long tasks, it can send intermediate progress text back to QQ
+- If the QQ waiting window is exceeded, the bot returns the latest available progress text instead of a blind timeout failure
+- Timed-out backend sessions are aborted so they do not keep running forever in the background
 
 ## API Keys Setup
 

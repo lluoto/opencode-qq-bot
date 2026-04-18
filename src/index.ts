@@ -16,6 +16,7 @@ let router: EventRouter | null = null
 let sessions: SessionManager | null = null
 let config: any = null
 let gateway: any = null
+let bridge: ReturnType<typeof createBridge> | null = null
 let isShuttingDown = false
 let consecutiveFailures = 0
 
@@ -47,7 +48,7 @@ async function startServer(): Promise<boolean> {
     await router.start()
 
     sessions = new SessionManager(client)
-    const bridge = createBridge(config, client, router, sessions)
+    bridge = createBridge(config, client, router, sessions)
 
     gateway = await startGateway({
       appId: config.qq.appId,
@@ -60,6 +61,7 @@ async function startServer(): Promise<boolean> {
 
     consecutiveFailures = 0
     console.log("[index] OpenCode QQ Bot 已启动")
+    console.log(`[index] TUI attach 地址: ${process.env.OPENCODE_TUI_ATTACH_URL || config.opencode.baseUrl}`)
     return true
   } catch (error) {
     console.error("[index] 启动失败:", error)
@@ -77,6 +79,7 @@ async function restartServer(): Promise<void> {
     if (gateway) { gateway.stop(); gateway = null }
     if (router) { router.stop(); router = null }
     if (serverClose) { serverClose(); serverClose = null }
+    bridge = null
     client = null
   } catch (e) {
     console.error("[index] 清理失败:", e)
@@ -120,6 +123,10 @@ async function main(): Promise<void> {
   
   setInterval(async () => {
     if (isShuttingDown || !client) return
+    if (bridge?.hasActiveRequests()) {
+      console.log("[index] 跳过健康检查：当前有请求处理中")
+      return
+    }
     
     try {
       await client.session.list()

@@ -11,6 +11,9 @@ interface UserSession {
   agentId?: string
 }
 
+const DEFAULT_PROVIDER_ID = "openai"
+const DEFAULT_MODEL_ID = "gpt-5.4-mini"
+
 export class SessionManager {
   private sessions = new Map<string, UserSession>()
   private client: OpencodeClient
@@ -27,6 +30,8 @@ export class SessionManager {
     const session: UserSession = {
       sessionId: result.data!.id,
       title: result.data!.title,
+      providerId: DEFAULT_PROVIDER_ID,
+      modelId: DEFAULT_MODEL_ID,
     }
     this.sessions.set(userId, session)
     return session
@@ -37,6 +42,8 @@ export class SessionManager {
     const session: UserSession = {
       sessionId: result.data!.id,
       title: result.data!.title,
+      providerId: DEFAULT_PROVIDER_ID,
+      modelId: DEFAULT_MODEL_ID,
     }
     this.sessions.set(userId, session)
     return session

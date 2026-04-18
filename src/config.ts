@@ -67,6 +67,8 @@ export async function ensureConfig(): Promise<void> {
     `QQ_APP_SECRET=${appSecret}`,
     `QQ_SANDBOX=false`,
     `# OPENCODE_BASE_URL=http://localhost:4096`,
+    `OPENCODE_TUI_ATTACH_URL=http://127.0.0.1:4096`,
+    `OPENCODE_LOCAL_TOOL_DIR=${join(homedir(), ".local", "share", "opencode", "tool-output")}`,
     `ALLOWED_USERS=`,
     `MAX_REPLY_LENGTH=3000`,
   ].join("\n") + "\n"
