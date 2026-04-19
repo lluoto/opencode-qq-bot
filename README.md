@@ -223,24 +223,35 @@ QQ 用户 @机器人 发消息
        v
   Bridge 桥接层
        |
-       +---> /命令 ---> 命令处理 ---> 回复
+       +---> /命令 或 \命令 ---> 命令处理 ---> 回复
+       |
+       +---> 数字回复且存在待切换会话 ---> 会话切换 ---> 回复
+       |
+       +---> 数字回复且存在待确认/待授权 ---> 继续确认或权限决策
        |
        +---> 普通消息
                |
                v
          OpenCode SDK
-         session.prompt()
+         promptAsync()
                |
                v
-         SSE 事件流收集回复
+         SSE 事件流
                |
-               v
-         session.idle ---> 回复 QQ 用户
+               +---> message.part.updated ---> 可按阶段回推进度到 QQ
+               |
+               +---> permission.asked ---> 发送权限确认到 QQ
+               |
+               +---> assistant 文本确认 ---> 发送操作确认到 QQ
+               |
+               +---> session.idle ---> 发送最终回复到 QQ
 ```
 
-- 使用 Fire-and-Forget 模式：`prompt()` 不阻塞，通过 SSE 事件流异步收集回复
+- 使用 Fire-and-Forget 模式：`promptAsync()` 不阻塞，通过 SSE 事件流异步收集回复
 - 全局一个 SSE 连接，EventRouter 按 sessionId 分发到各用户
-- AI 回复收集完毕后一次性发送，规避 QQ 被动回复速率限制
+- 长任务会先发送“正在处理中”，并可在处理中回推阶段性进度
+- 如果中途出现确认或权限请求，QQ 可以直接回复数字继续流程
+- `session.idle` 时再发送最终结果，避免把普通数字回复误发给 AI
 
 ---
 
