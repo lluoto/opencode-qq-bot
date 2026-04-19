@@ -223,34 +223,48 @@ QQ 用户 @机器人 发消息
        v
   Bridge 桥接层
        |
-       +---> /命令 或 \命令 ---> 命令处理 ---> 回复
+       +---> 1. /命令 或 \命令 ---> 命令处理 ---> 回复
        |
-       +---> 数字回复且存在待切换会话 ---> 会话切换 ---> 回复
+       +---> 2. 若存在 pending session selection
+       |         ---> 数字回复 ---> handlePendingSelection() ---> 回复
        |
-       +---> 数字回复且存在待确认/待授权 ---> 继续确认或权限决策
+       +---> 3. 若存在 pending permission
+       |         ---> 数字回复 ---> postSessionIdPermissionsPermissionId() ---> 回复
        |
-       +---> 普通消息
-               |
-               v
-         OpenCode SDK
-         promptAsync()
-               |
-               v
-         SSE 事件流
-               |
-               +---> message.part.updated ---> 可按阶段回推进度到 QQ
-               |
-               +---> permission.asked ---> 发送权限确认到 QQ
-               |
-               +---> assistant 文本确认 ---> 发送操作确认到 QQ
-               |
-               +---> session.idle ---> 发送最终回复到 QQ
+       +---> 4. 若存在 pending confirmation
+       |         ---> 数字回复 ---> 发送 follow-up prompt 回原 session ---> 再继续监听 SSE
+       |
+       +---> 5. 普通消息
+                 |
+                 v
+           OpenCode SDK
+           promptAsync()
+                 |
+                 v
+           SSE 事件流
+                 |
+                 +---> message.part.updated
+                 |      ---> 长任务时可回推进度到 QQ
+                 |
+                 +---> permission.asked / permission.updated
+                 |      ---> Bridge 记录 pending permission
+                 |      ---> 发送权限确认到 QQ
+                 |
+                 +---> assistant 普通文本
+                 |      ---> 若文本形态像确认问题
+                 |      ---> Bridge 记录 pending confirmation
+                 |      ---> 发送操作确认到 QQ
+                 |
+                 +---> session.idle
+                        ---> 发送最终回复到 QQ
 ```
 
 - 使用 Fire-and-Forget 模式：`promptAsync()` 不阻塞，通过 SSE 事件流异步收集回复
 - 全局一个 SSE 连接，EventRouter 按 sessionId 分发到各用户
+- `pending session selection`、`pending permission`、`pending confirmation` 是三条独立分支，按顺序优先匹配
 - 长任务会先发送“正在处理中”，并可在处理中回推阶段性进度
-- 如果中途出现确认或权限请求，QQ 可以直接回复数字继续流程
+- 权限确认不是普通聊天回复，而是通过权限 API 回写给 OpenCode
+- 操作确认不是专门的 SSE 事件类型，而是 Bridge 从助手文本内容中识别出来的
 - `session.idle` 时再发送最终结果，避免把普通数字回复误发给 AI
 
 ---
