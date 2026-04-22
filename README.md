@@ -280,3 +280,7 @@ QQ 用户 @机器人 发消息
 ## License
 
 MIT
+
+## 延伸阅读
+
+- [ARCHITECTURE_ZH.md](./ARCHITECTURE_ZH.md) - 面向 Python 开发者的中文架构导读
