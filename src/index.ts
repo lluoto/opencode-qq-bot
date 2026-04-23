@@ -15,7 +15,7 @@ async function main(): Promise<void> {
 
   let serverClose: (() => void) | null = null
 
-  if (!config.opencode.externalUrl) {
+  const startEmbeddedServer = async (): Promise<void> => {
     const { createOpencodeServer } = await import("@opencode-ai/sdk")
     const server = await createOpencodeServer({ port: 4096 })
     config.opencode.baseUrl = server.url
@@ -23,8 +23,23 @@ async function main(): Promise<void> {
     console.log(`[index] opencode serve 已启动: ${server.url}`)
   }
 
-  const client = createClient(config.opencode.baseUrl)
-  await healthCheck(client)
+  if (!config.opencode.externalUrl) {
+    await startEmbeddedServer()
+  }
+
+  let client = createClient(config.opencode.baseUrl)
+  try {
+    await healthCheck(client)
+  } catch (error) {
+    if (config.opencode.externalUrl && isLocalOpencodeUrl(config.opencode.baseUrl)) {
+      console.warn(`[index] 本地 OpenCode 不可达，回退到内嵌模式: ${toErrorMessage(error)}`)
+      await startEmbeddedServer()
+      client = createClient(config.opencode.baseUrl)
+      await healthCheck(client)
+    } else {
+      throw error
+    }
+  }
 
   startBackgroundTokenRefresh(config.qq.appId, config.qq.clientSecret)
 
@@ -59,6 +74,19 @@ async function main(): Promise<void> {
 
   process.once("SIGINT", () => shutdown("SIGINT"))
   process.once("SIGTERM", () => shutdown("SIGTERM"))
+}
+
+function isLocalOpencodeUrl(baseUrl: string): boolean {
+  try {
+    const url = new URL(baseUrl)
+    return ["localhost", "127.0.0.1", "::1"].includes(url.hostname)
+  } catch {
+    return false
+  }
+}
+
+function toErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 main().catch((error) => {
