@@ -3,6 +3,7 @@ import type { CommandContext } from "./types.js"
 import { SELECTION_TTL_MS } from "./types.js"
 import {
   abortSession,
+  listSessions,
   listProviderModels,
   listAgents as adapterListAgents,
   updateSessionTitle,
@@ -60,9 +61,9 @@ export async function handleStatus(ctx: MessageContext, cmdCtx: CommandContext):
 }
 
 export async function handleSessions(ctx: MessageContext, cmdCtx: CommandContext): Promise<string> {
-  const sessions = cmdCtx.sessions.getUserSessions(ctx.userId)
+  const sessions = await listSessions(cmdCtx.client)
   if (sessions.length === 0) {
-    return "当前没有可切换的历史会话"
+    return "当前 OpenCode server 上没有可切换的会话"
   }
 
   const currentSessionId = cmdCtx.sessions.getSession(ctx.userId)?.sessionId

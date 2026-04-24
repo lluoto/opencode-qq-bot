@@ -27,18 +27,18 @@ async function main(): Promise<void> {
     await startEmbeddedServer()
   }
 
-  let client = createClient(config.opencode.baseUrl)
+  const client = createClient(config.opencode.baseUrl)
   try {
     await healthCheck(client)
   } catch (error) {
-    if (config.opencode.externalUrl && isLocalOpencodeUrl(config.opencode.baseUrl)) {
-      console.warn(`[index] 本地 OpenCode 不可达，回退到内嵌模式: ${toErrorMessage(error)}`)
-      await startEmbeddedServer()
-      client = createClient(config.opencode.baseUrl)
-      await healthCheck(client)
-    } else {
-      throw error
+    if (config.opencode.externalUrl) {
+      throw new Error(
+        `外部 OpenCode 不可达：${toErrorMessage(error)}\n` +
+        `当前配置的 OPENCODE_BASE_URL=${config.opencode.baseUrl}\n` +
+        `请先确认该地址上已经启动可访问的 OpenCode server，再重新运行 openqq。`,
+      )
     }
+    throw error
   }
 
   startBackgroundTokenRefresh(config.qq.appId, config.qq.clientSecret)
@@ -74,15 +74,6 @@ async function main(): Promise<void> {
 
   process.once("SIGINT", () => shutdown("SIGINT"))
   process.once("SIGTERM", () => shutdown("SIGTERM"))
-}
-
-function isLocalOpencodeUrl(baseUrl: string): boolean {
-  try {
-    const url = new URL(baseUrl)
-    return ["localhost", "127.0.0.1", "::1"].includes(url.hostname)
-  } catch {
-    return false
-  }
 }
 
 function toErrorMessage(error: unknown): string {
