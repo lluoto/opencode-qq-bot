@@ -29,10 +29,13 @@
 
 - **QQ 群聊 + 私聊** - @机器人 或直接私信，两种方式都支持
 - **内嵌 OpenCode** - 自动启动 opencode serve，无需手动管理进程
+- **外部 OpenCode 对接** - 可连接指定 `OPENCODE_BASE_URL`，并在不可达时直接报错提醒
 - **会话管理** - 每用户独立会话，支持新建、切换、重命名
 - **模型切换** - 随时切换 AI 模型和 Agent 模式
 - **交互引导** - 首次运行自动引导配置，零门槛启动
 - **命令系统** - 10 个内置命令覆盖常用操作
+- **远端会话切换** - `/sessions` 直接读取当前 OpenCode server 的真实 session 列表
+- **更稳的 QQ Gateway 鉴权** - 仅在明确 auth failure 时清 token，减少无意义重连/刷新
 
 ---
 
@@ -132,6 +135,15 @@ OpenCode 需要权限确认
 ```
 
 机器人会尽量从权限事件里提取真实操作和路径，避免出现 `undefined`。
+
+---
+
+## 最近修复
+
+- `/sessions` 不再依赖 openqq 进程内存历史，而是从当前连接的 OpenCode server 实时拉取会话列表
+- 配置了 `OPENCODE_BASE_URL` 时，如果外部 OpenCode 不可达，会直接报错提醒，而不是静默启动新的内嵌 server
+- QQ Gateway 的 token 清理逻辑改为基于结构化 auth failure 判断，减少普通网络抖动时反复 `Token refreshed` / `GET /gateway`
+- `\sessions`、会话数字回复优先级、操作确认与权限确认流程已整合到当前桥接逻辑中
 
 ---
 
@@ -284,3 +296,4 @@ MIT
 ## 延伸阅读
 
 - [ARCHITECTURE_ZH.md](./ARCHITECTURE_ZH.md) - 面向 Python 开发者的中文架构导读
+- [CHANGELOG.md](./CHANGELOG.md) - 最近修复与变更记录
