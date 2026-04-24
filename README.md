@@ -80,12 +80,26 @@ QQ App Secret: ********
 
 如果你已经单独运行了 opencode serve（比如同时在用 TUI），设置环境变量连接外部实例：
 
+> 注意：如果要让 `openqq` 连接你自己启动的 OpenCode server，请显式指定 host 和 port，并确保它与 `OPENCODE_BASE_URL` 完全一致。
+>
+> 例如：
+>
+> ```bash
+> opencode serve --hostname 127.0.0.1 --port 4096
+> ```
+>
+> 然后让 `openqq` 使用：
+>
+> ```bash
+> OPENCODE_BASE_URL=http://127.0.0.1:4096
+> ```
+
 ```bash
 # 方式 1: 环境变量
-OPENCODE_BASE_URL=http://localhost:4096 openqq
+OPENCODE_BASE_URL=http://127.0.0.1:4096 openqq
 
 # 方式 2: 写入 ~/.openqq/.env
-echo "OPENCODE_BASE_URL=http://localhost:4096" >> ~/.openqq/.env
+echo "OPENCODE_BASE_URL=http://127.0.0.1:4096" >> ~/.openqq/.env
 ```
 
 ---

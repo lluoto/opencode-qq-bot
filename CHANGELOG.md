@@ -6,6 +6,7 @@
 
 - 新增 `ARCHITECTURE_ZH.md`，面向熟悉 Python 但不熟悉 TS/JS 的新人说明项目结构、桥接逻辑和多 Bot 可行性
 - README 新增最近修复说明、外部 OpenCode 对接说明、变更记录入口
+- README 新增提示：启动外部 OpenCode 时应显式指定 host/port，并与 `openqq` 的 `OPENCODE_BASE_URL` 保持一致
 
 ### Changed
 
