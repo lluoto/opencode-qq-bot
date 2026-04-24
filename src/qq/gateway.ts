@@ -3,7 +3,7 @@
 // @pos:    qq层 - QQ Bot WebSocket Gateway 状态机 (心跳/重连/消息分发)
 import WebSocket from "ws"
 import { clearTokenCache, getAccessToken } from "./token.js"
-import { getGatewayUrl } from "./http.js"
+import { getGatewayUrl, isQQAuthFailure } from "./http.js"
 import type {
   C2CMessageEvent,
   GatewayHelloData,
@@ -390,8 +390,10 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayCont
     } catch (error) {
       state.connecting = false
       console.error("[qq-gateway] 建连失败:", error)
-      clearTokenCache()
-      state.accessToken = null
+      if (isQQAuthFailure(error)) {
+        clearTokenCache()
+        state.accessToken = null
+      }
       scheduleReconnect(state, connect)
     }
   }

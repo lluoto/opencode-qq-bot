@@ -7,6 +7,35 @@ const DEBUG = process.env.DEBUG_QQ_API === "true"
 const DEFAULT_API_TIMEOUT = 30000
 const FILE_UPLOAD_TIMEOUT = 120000
 
+export class QQApiError extends Error {
+  readonly status?: number
+  readonly code?: number
+  readonly path: string
+  readonly authFailure: boolean
+  readonly source: "gateway" | "token"
+
+  constructor(options: {
+    message: string
+    path: string
+    status?: number
+    code?: number
+    authFailure: boolean
+    source: "gateway" | "token"
+  }) {
+    super(options.message)
+    this.name = "QQApiError"
+    this.status = options.status
+    this.code = options.code
+    this.path = options.path
+    this.authFailure = options.authFailure
+    this.source = options.source
+  }
+}
+
+export function isQQAuthFailure(error: unknown): boolean {
+  return error instanceof QQApiError && error.authFailure
+}
+
 /**
  * 统一封装 QQ Bot REST 请求。
  * 保留源实现的超时、日志、错误处理和 JSON 解析行为。
@@ -98,7 +127,14 @@ export async function apiRequest<T = unknown>(
 
   if (!res.ok) {
     const error = data as { message?: string; code?: number }
-    throw new Error(`API Error [${path}]: ${error.message ?? JSON.stringify(data)}`)
+    throw new QQApiError({
+      message: `API Error [${path}]: ${error.message ?? JSON.stringify(data)}`,
+      path,
+      status: res.status,
+      code: error.code,
+      authFailure: res.status === 401 || res.status === 403,
+      source: "gateway",
+    })
   }
 
   return data

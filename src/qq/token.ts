@@ -2,6 +2,8 @@
 // @output: getAccessToken, clearTokenCache, getTokenStatus, startBackgroundTokenRefresh, stopBackgroundTokenRefresh
 // @pos:    qq层 - QQ Bot Token 鉴权 (缓存 + singleflight + 后台刷新)
 
+import { QQApiError } from "./http.js"
+
 const TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken"
 const DEBUG = process.env.DEBUG_QQ_API === "true"
 
@@ -80,7 +82,14 @@ async function doFetchToken(appId: string, clientSecret: string): Promise<string
   }
 
   if (!data.access_token) {
-    throw new Error(`Failed to get access_token: ${JSON.stringify(data)}`)
+    throw new QQApiError({
+      message: `Failed to get access_token: ${JSON.stringify(data)}`,
+      path: "/app/getAppAccessToken",
+      status: response.status,
+      code: (data as { code?: number }).code,
+      authFailure: response.status === 401 || response.status === 403,
+      source: "token",
+    })
   }
 
   cachedToken = {
