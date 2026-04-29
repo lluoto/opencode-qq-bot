@@ -32,6 +32,7 @@
 - **外部 OpenCode 对接** - 可连接指定 `OPENCODE_BASE_URL`，并在不可达时直接报错提醒
 - **会话管理** - 每用户独立会话，支持新建、切换、重命名
 - **模型切换** - 随时切换 AI 模型和 Agent 模式
+- **多 Bot / 多模型** - 一个进程里可同时启动多个 QQ 机器人，并给每个机器人配置不同默认模型
 - **交互引导** - 首次运行自动引导配置，零门槛启动
 - **命令系统** - 10 个内置命令覆盖常用操作
 - **远端会话切换** - `/sessions` 直接读取当前 OpenCode server 的真实 session 列表
@@ -102,6 +103,26 @@ OPENCODE_BASE_URL=http://127.0.0.1:4096 openqq
 echo "OPENCODE_BASE_URL=http://127.0.0.1:4096" >> ~/.openqq/.env
 ```
 
+### 多 Bot 模式
+
+如果你想在同一个进程里同时跑两个 QQ 机器人，并让它们默认指向不同模型，可以使用 `QQ_BOTS_JSON`：
+
+```env
+QQ_BOTS_JSON=[{"id":"bot-a","appId":"101","clientSecret":"secret-a","sandbox":false,"defaultModel":"openai/gpt-5.4"},{"id":"bot-b","appId":"102","clientSecret":"secret-b","sandbox":false,"defaultModel":"anthropic/claude-sonnet-4-5"}]
+ALLOWED_USERS=
+MAX_REPLY_LENGTH=3000
+```
+
+可选字段：
+
+- `id`: 机器人实例名，日志里会用到；默认等于 `appId`
+- `opencodeBaseUrl`: 如果填写，则该机器人连接指定外部 OpenCode
+- `defaultModel`: 机器人默认模型，格式为 `provider/model`
+- `allowedUsers`: 可单独覆盖该机器人的允许用户列表
+- `maxReplyLength`: 可单独覆盖该机器人的最大回复长度
+
+未填写 `opencodeBaseUrl` 的机器人会共用当前进程里自动启动的内嵌 OpenCode server。
+
 ---
 
 ## 命令列表
@@ -158,6 +179,7 @@ OpenCode 需要权限确认
 - 配置了 `OPENCODE_BASE_URL` 时，如果外部 OpenCode 不可达，会直接报错提醒，而不是静默启动新的内嵌 server
 - QQ Gateway 的 token 清理逻辑改为基于结构化 auth failure 判断，减少普通网络抖动时反复 `Token refreshed` / `GET /gateway`
 - `\sessions`、会话数字回复优先级、操作确认与权限确认流程已整合到当前桥接逻辑中
+- 支持通过 `QQ_BOTS_JSON` 启动多个 QQ Bot，并给每个 Bot 配不同默认模型
 
 ---
 
@@ -209,6 +231,8 @@ OpenCode 需要权限确认
 | `QQ_APP_SECRET` | 是 | - | QQ 机器人 AppSecret |
 | `QQ_SANDBOX` | 否 | `false` | 是否使用沙箱环境 |
 | `OPENCODE_BASE_URL` | 否 | (自动启动) | 外部 opencode serve 地址 |
+| `OPENCODE_DEFAULT_MODEL` | 否 | - | 单 Bot 模式下的默认模型，格式 `provider/model` |
+| `QQ_BOTS_JSON` | 否 | - | 多 Bot 配置 JSON；填写后会忽略单 Bot 的 `QQ_APP_ID/QQ_APP_SECRET` |
 | `ALLOWED_USERS` | 否 | (不限制) | 允许使用的 QQ 用户 ID，逗号分隔 |
 | `MAX_REPLY_LENGTH` | 否 | `3000` | 单条回复最大字符数 |
 
