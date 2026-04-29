@@ -58,23 +58,25 @@ export class EventRouter {
   }
 
   private extractSessionId(event: Event): string | undefined {
-    switch (event.type) {
+    const eventType = event.type as string
+    const properties = event.properties as Record<string, any>
+    switch (eventType) {
       case "message.part.updated":
-        return event.properties.part.sessionID
+        return properties.part?.sessionID
       case "message.updated":
-        return event.properties.info.sessionID
+        return properties.info?.sessionID
       case "session.idle":
       case "session.compacted":
-        return event.properties.sessionID
+        return properties.sessionID
       case "session.status":
-        return event.properties.sessionID
+        return properties.sessionID
       case "session.error":
       case "permission.asked":
       case "permission.updated":
       case "permission.replied":
-        return event.properties.sessionID
+        return properties.sessionID
       case "message.removed":
-        return event.properties.sessionID
+        return properties.sessionID
       default:
         return undefined
     }

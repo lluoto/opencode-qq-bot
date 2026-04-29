@@ -4,6 +4,7 @@ import { getAccessToken } from "./qq/token.js"
 import { replyToQQ } from "./qq/sender.js"
 import type { OpencodeClient } from "./opencode/client.js"
 import { promptAsync } from "./opencode/adapter.js"
+import { isAgentAllowedForModel } from "./opencode/agent-policy.js"
 import { EventRouter } from "./opencode/events.js"
 import { SessionManager } from "./opencode/sessions.js"
 import type { Event } from "@opencode-ai/sdk"
@@ -84,7 +85,7 @@ export function createBridge(
         return
       }
 
-      const permissionReply = await maybeHandlePendingPermission(ctx, client, pendingPermissions)
+      const permissionReply = await maybeHandlePendingPermission(ctx, client, sessions, pendingPermissions)
       if (permissionReply !== null) {
         await sendReply(ctx, permissionReply)
         return
@@ -119,6 +120,7 @@ export function createBridge(
         const session = await sessions.getOrCreate(ctx.userId)
         const model = sessions.getModel(ctx.userId)
         const agent = sessions.getAgent(ctx.userId)
+        const effectiveAgent = isAgentAllowedForModel(agent, model.providerId, model.modelId) ? agent : undefined
 
         const replyText = await waitForSessionReply(router, session.sessionId, () => {
           void promptAsync(client, {
@@ -127,7 +129,7 @@ export function createBridge(
             model: model.providerId && model.modelId
               ? { providerID: model.providerId, modelID: model.modelId }
               : undefined,
-            agent,
+            agent: effectiveAgent,
           })
         }, async (permission) => {
           pendingPermissions.set(ctx.userId, permission)
@@ -194,6 +196,7 @@ async function maybeHandlePendingSelection(
 async function maybeHandlePendingPermission(
   ctx: MessageContext,
   client: OpencodeClient,
+  sessions: SessionManager,
   pendingPermissions: Map<string, PendingPermissionRequest>,
 ): Promise<string | null> {
   const pending = pendingPermissions.get(ctx.userId)
@@ -209,6 +212,12 @@ async function maybeHandlePendingPermission(
   const response = parsePermissionResponse(ctx.content)
   if (!response) {
     return "当前有权限请求待确认。请回复 1(允许一次) / 2(总是允许) / 3(拒绝)"
+  }
+
+  const currentSession = sessions.getSession(ctx.userId)
+  if (currentSession && currentSession.sessionId !== pending.sessionId) {
+    pendingPermissions.delete(ctx.userId)
+    return "权限请求已失效：当前会话已切换，请重新发送任务"
   }
 
   await (client as any).postSessionIdPermissionsPermissionId({
@@ -263,8 +272,12 @@ async function maybeHandlePendingConfirmation(
   busyUsers.add(ctx.userId)
   try {
     const session = await sessions.getOrCreate(ctx.userId)
+    if (pending.sessionId && pending.sessionId !== session.sessionId) {
+      return "确认请求已失效：当前会话已切换，请重新发送任务"
+    }
     const model = sessions.getModel(ctx.userId)
     const agent = sessions.getAgent(ctx.userId)
+    const effectiveAgent = isAgentAllowedForModel(agent, model.providerId, model.modelId) ? agent : undefined
 
     return await waitForSessionReply(router, pending.sessionId || session.sessionId, () => {
       void promptAsync(client, {
@@ -273,7 +286,7 @@ async function maybeHandlePendingConfirmation(
         model: model.providerId && model.modelId
           ? { providerID: model.providerId, modelID: model.modelId }
           : undefined,
-        agent,
+        agent: effectiveAgent,
       })
     })
   } finally {
@@ -311,15 +324,18 @@ function waitForSessionReply(
 
     router.unregister(sessionId)
     router.register(sessionId, (event: Event) => {
-      if (event.type === "message.part.updated") {
-        const part = event.properties.part
+      const eventType = event.type as string
+      const properties = event.properties as Record<string, any>
+
+      if (eventType === "message.part.updated") {
+        const part = properties.part
         if (part.type === "text") {
           latestText = part.text
         }
         return
       }
 
-      if (event.type === "permission.asked" || event.type === "permission.updated") {
+      if (eventType === "permission.asked" || eventType === "permission.updated") {
         if (onPermission) {
           const permission = event.properties as any
           const extracted = extractPermissionDetails(permission)
@@ -334,13 +350,13 @@ function waitForSessionReply(
         return
       }
 
-      if (event.type === "session.idle") {
+      if (eventType === "session.idle") {
         finish(() => resolve(latestText || "(AI 未返回内容)"))
         return
       }
 
-      if (event.type === "session.error") {
-        finish(() => reject(new Error(toErrorMessage(event.properties.error) || "未知错误")))
+      if (eventType === "session.error") {
+        finish(() => reject(new Error(toErrorMessage(properties.error) || "未知错误")))
       }
     })
 
