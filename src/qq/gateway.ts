@@ -371,7 +371,7 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayCont
 
         // token 失效时强制刷新，避免死循环拿旧 token
         if (code === 4004) {
-          clearTokenCache()
+          clearTokenCache(options.appId)
           state.accessToken = null
         }
 
@@ -391,7 +391,7 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayCont
       state.connecting = false
       console.error("[qq-gateway] 建连失败:", error)
       if (isQQAuthFailure(error)) {
-        clearTokenCache()
+        clearTokenCache(options.appId)
         state.accessToken = null
       }
       scheduleReconnect(state, connect)

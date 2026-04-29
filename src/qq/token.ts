@@ -7,37 +7,52 @@ import { QQApiError } from "./http.js"
 const TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken"
 const DEBUG = process.env.DEBUG_QQ_API === "true"
 
-let cachedToken: { token: string; expiresAt: number; appId: string } | null = null
-// Singleflight：防止并发获取 Token 时重复请求
-let tokenFetchPromise: Promise<string> | null = null
+interface CachedToken {
+  token: string
+  expiresAt: number
+}
+
+interface BackgroundTokenRefreshOptions {
+  refreshAheadMs?: number
+  randomOffsetMs?: number
+  minRefreshIntervalMs?: number
+  retryDelayMs?: number
+  log?: {
+    info: (msg: string) => void
+    error: (msg: string) => void
+    debug?: (msg: string) => void
+  }
+}
+
+const cachedTokens = new Map<string, CachedToken>()
+const tokenFetchPromises = new Map<string, Promise<string>>()
+const backgroundRefreshAbortControllers = new Map<string, AbortController>()
 
 /**
  * 获取 AccessToken，内置缓存与 singleflight 并发保护。
  * 当多个请求同时发现 Token 过期时，只会发起一次真实刷新请求。
  */
 export async function getAccessToken(appId: string, clientSecret: string): Promise<string> {
-  if (cachedToken && Date.now() < cachedToken.expiresAt - 5 * 60 * 1000 && cachedToken.appId === appId) {
+  const cachedToken = cachedTokens.get(appId)
+  if (cachedToken && Date.now() < cachedToken.expiresAt - 5 * 60 * 1000) {
     return cachedToken.token
   }
 
-  if (cachedToken && cachedToken.appId !== appId) {
-    cachedToken = null
-    tokenFetchPromise = null
+  const existingFetch = tokenFetchPromises.get(appId)
+  if (existingFetch) {
+    return existingFetch
   }
 
-  if (tokenFetchPromise) {
-    return tokenFetchPromise
-  }
-
-  tokenFetchPromise = (async () => {
+  const fetchPromise = (async () => {
     try {
       return await doFetchToken(appId, clientSecret)
     } finally {
-      tokenFetchPromise = null
+      tokenFetchPromises.delete(appId)
     }
   })()
 
-  return tokenFetchPromise
+  tokenFetchPromises.set(appId, fetchPromise)
+  return fetchPromise
 }
 
 /**
@@ -92,13 +107,13 @@ async function doFetchToken(appId: string, clientSecret: string): Promise<string
     })
   }
 
-  cachedToken = {
+  const cachedToken = {
     token: data.access_token,
     expiresAt: Date.now() + (data.expires_in ?? 7200) * 1000,
-    appId,
   }
+  cachedTokens.set(appId, cachedToken)
 
-  console.log(`[qqbot-api] Token refreshed, expires at: ${new Date(cachedToken.expiresAt).toISOString()}`)
+  console.log(`[qqbot-api] Token refreshed (${appId}), expires at: ${new Date(cachedToken.expiresAt).toISOString()}`)
   return cachedToken.token
 }
 
@@ -106,15 +121,20 @@ async function doFetchToken(appId: string, clientSecret: string): Promise<string
  * 清空当前 Token 缓存。
  * 不会中断已经在进行中的刷新请求。
  */
-export function clearTokenCache(): void {
-  cachedToken = null
+export function clearTokenCache(appId?: string): void {
+  if (appId) {
+    cachedTokens.delete(appId)
+    return
+  }
+  cachedTokens.clear()
 }
 
 /**
  * 获取当前 Token 缓存状态，便于监控或启动阶段打印状态。
  */
-export function getTokenStatus(): { status: "valid" | "expired" | "refreshing" | "none"; expiresAt: number | null } {
-  if (tokenFetchPromise) {
+export function getTokenStatus(appId: string): { status: "valid" | "expired" | "refreshing" | "none"; expiresAt: number | null } {
+  const cachedToken = cachedTokens.get(appId)
+  if (tokenFetchPromises.has(appId)) {
     return { status: "refreshing", expiresAt: cachedToken?.expiresAt ?? null }
   }
   if (!cachedToken) {
@@ -123,21 +143,6 @@ export function getTokenStatus(): { status: "valid" | "expired" | "refreshing" |
   const isValid = Date.now() < cachedToken.expiresAt - 5 * 60 * 1000
   return { status: isValid ? "valid" : "expired", expiresAt: cachedToken.expiresAt }
 }
-
-interface BackgroundTokenRefreshOptions {
-  refreshAheadMs?: number
-  randomOffsetMs?: number
-  minRefreshIntervalMs?: number
-  retryDelayMs?: number
-  log?: {
-    info: (msg: string) => void
-    error: (msg: string) => void
-    debug?: (msg: string) => void
-  }
-}
-
-let backgroundRefreshRunning = false
-let backgroundRefreshAbortController: AbortController | null = null
 
 /**
  * 启动后台 Token 刷新循环。
@@ -148,8 +153,8 @@ export function startBackgroundTokenRefresh(
   clientSecret: string,
   options?: BackgroundTokenRefreshOptions,
 ): void {
-  if (backgroundRefreshRunning) {
-    console.log("[qqbot-api] Background token refresh already running")
+  if (backgroundRefreshAbortControllers.has(appId)) {
+    console.log(`[qqbot-api] Background token refresh already running (${appId})`)
     return
   }
 
@@ -161,17 +166,18 @@ export function startBackgroundTokenRefresh(
     log,
   } = options ?? {}
 
-  backgroundRefreshRunning = true
-  backgroundRefreshAbortController = new AbortController()
-  const signal = backgroundRefreshAbortController.signal
+  const abortController = new AbortController()
+  backgroundRefreshAbortControllers.set(appId, abortController)
+  const signal = abortController.signal
 
   const refreshLoop = async () => {
-    log?.info?.("[qqbot-api] Background token refresh started")
+    log?.info?.(`[qqbot-api] Background token refresh started (${appId})`)
 
     while (!signal.aborted) {
       try {
         await getAccessToken(appId, clientSecret)
 
+        const cachedToken = cachedTokens.get(appId)
         if (cachedToken) {
           const expiresIn = cachedToken.expiresAt - Date.now()
           const randomOffset = Math.random() * randomOffsetMs
@@ -180,39 +186,45 @@ export function startBackgroundTokenRefresh(
             minRefreshIntervalMs,
           )
 
-          log?.debug?.(`[qqbot-api] Token valid, next refresh in ${Math.round(refreshIn / 1000)}s`)
+          log?.debug?.(`[qqbot-api] Token valid (${appId}), next refresh in ${Math.round(refreshIn / 1000)}s`)
           await sleep(refreshIn, signal)
         } else {
-          log?.debug?.("[qqbot-api] No cached token, retrying soon")
+          log?.debug?.(`[qqbot-api] No cached token (${appId}), retrying soon`)
           await sleep(minRefreshIntervalMs, signal)
         }
       } catch (err) {
         if (signal.aborted) break
 
-        log?.error?.(`[qqbot-api] Background token refresh failed: ${err}`)
+        log?.error?.(`[qqbot-api] Background token refresh failed (${appId}): ${err}`)
         await sleep(retryDelayMs, signal)
       }
     }
 
-    backgroundRefreshRunning = false
-    log?.info?.("[qqbot-api] Background token refresh stopped")
+    backgroundRefreshAbortControllers.delete(appId)
+    log?.info?.(`[qqbot-api] Background token refresh stopped (${appId})`)
   }
 
   refreshLoop().catch((err) => {
-    backgroundRefreshRunning = false
-    log?.error?.(`[qqbot-api] Background token refresh crashed: ${err}`)
+    backgroundRefreshAbortControllers.delete(appId)
+    log?.error?.(`[qqbot-api] Background token refresh crashed (${appId}): ${err}`)
   })
 }
 
 /**
  * 停止后台 Token 刷新循环。
  */
-export function stopBackgroundTokenRefresh(): void {
-  if (backgroundRefreshAbortController) {
-    backgroundRefreshAbortController.abort()
-    backgroundRefreshAbortController = null
+export function stopBackgroundTokenRefresh(appId?: string): void {
+  if (appId) {
+    const abortController = backgroundRefreshAbortControllers.get(appId)
+    abortController?.abort()
+    backgroundRefreshAbortControllers.delete(appId)
+    return
   }
-  backgroundRefreshRunning = false
+
+  for (const abortController of backgroundRefreshAbortControllers.values()) {
+    abortController.abort()
+  }
+  backgroundRefreshAbortControllers.clear()
 }
 
 /**
