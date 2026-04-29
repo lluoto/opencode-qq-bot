@@ -9,6 +9,7 @@ import {
   updateSessionTitle,
   healthCheck,
 } from "../opencode/adapter.js"
+import { isAgentAllowedForModel, isOhMyOpenAgent } from "../opencode/agent-policy.js"
 
 export async function handleNew(ctx: MessageContext, cmdCtx: CommandContext): Promise<string> {
   const session = await cmdCtx.sessions.createNew(ctx.userId)
@@ -33,6 +34,9 @@ export async function handleStatus(ctx: MessageContext, cmdCtx: CommandContext):
   const session = cmdCtx.sessions.getSession(ctx.userId)
   const { providerId, modelId } = cmdCtx.sessions.getModel(ctx.userId)
   const agentId = cmdCtx.sessions.getAgent(ctx.userId)
+  const agentStatus = agentId
+    ? (isAgentAllowedForModel(agentId, providerId, modelId) ? agentId : `${agentId} (当前模型下已禁用)`)
+    : "默认"
 
   let openCodeStatus: string
   try {
@@ -56,7 +60,7 @@ export async function handleStatus(ctx: MessageContext, cmdCtx: CommandContext):
     `QQ 鉴权：${qqStatus}`,
     `会话：${session ? `${session.title ?? "未命名会话"} (${session.sessionId})` : "未创建"}`,
     `模型：${providerId && modelId ? `${providerId} / ${modelId}` : "默认"}`,
-    `Agent：${agentId ?? "默认"}`,
+    `Agent：${agentStatus}`,
   ].join("\n")
 }
 
@@ -138,13 +142,15 @@ export async function handleModel(ctx: MessageContext, args: string, cmdCtx: Com
 
 export async function handleAgent(ctx: MessageContext, args: string, cmdCtx: CommandContext): Promise<string> {
   const agents = await adapterListAgents(cmdCtx.client)
+  const { providerId, modelId } = cmdCtx.sessions.getModel(ctx.userId)
+  const visibleAgents = agents.filter((agent) => isAgentAllowedForModel(agent.id, providerId, modelId))
   if (!args) {
-    if (agents.length === 0) {
+    if (visibleAgents.length === 0) {
       return "当前没有可用 Agent"
     }
 
     const currentAgent = cmdCtx.sessions.getAgent(ctx.userId)
-    const lines = agents.map((agent, index) => {
+    const lines = visibleAgents.map((agent, index) => {
       const isCurrent = currentAgent === agent.id
       return `${index + 1}. ${isCurrent ? "[当前] " : ""}${agent.label}`
     })
@@ -156,6 +162,13 @@ export async function handleAgent(ctx: MessageContext, args: string, cmdCtx: Com
   const matched = agents.find((agent) => agent.id.toLowerCase() === normalized)
   if (!matched) {
     return `未找到 Agent：${args}`
+  }
+
+  if (!isAgentAllowedForModel(matched.id, providerId, modelId)) {
+    const reason = isOhMyOpenAgent(matched.id)
+      ? "当前模型不是 OpenAI GPT 系列，不能使用 oh-my-opencode Agent"
+      : "当前模型下不能使用该 Agent"
+    return `${reason}：${matched.id}`
   }
 
   await ensureSession(ctx.userId, cmdCtx)
