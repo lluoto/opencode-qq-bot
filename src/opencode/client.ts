@@ -1,18 +1,10 @@
 // @input:  @opencode-ai/sdk
-// @output: createClient, getClient, healthCheck, OpencodeClient
+// @output: createClient, healthCheck, OpencodeClient
 // @pos:    opencode层 - OpenCode SDK 客户端封装 + 健康检查
 import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk"
 
-let client: OpencodeClient | null = null
-
 export function createClient(baseUrl: string): OpencodeClient {
-  client = createOpencodeClient({ baseUrl })
-  return client
-}
-
-export function getClient(): OpencodeClient {
-  if (!client) throw new Error("OpenCode client not initialized")
-  return client
+  return createOpencodeClient({ baseUrl })
 }
 
 export async function healthCheck(oc: OpencodeClient): Promise<void> {
