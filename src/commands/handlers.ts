@@ -65,7 +65,8 @@ export async function handleStatus(ctx: MessageContext, cmdCtx: CommandContext):
 }
 
 export async function handleSessions(ctx: MessageContext, cmdCtx: CommandContext): Promise<string> {
-  const sessions = await listSessions(cmdCtx.client)
+  const allSessions = await listSessions(cmdCtx.client)
+  const sessions = allSessions.filter((s) => !s.title.includes("("))
   if (sessions.length === 0) {
     return "当前 OpenCode server 上没有可切换的会话"
   }
@@ -99,12 +100,26 @@ export async function handleModel(ctx: MessageContext, args: string, cmdCtx: Com
       expiresAt: Date.now() + SELECTION_TTL_MS,
     })
 
-    const lines = models.map((m, index) => {
-      const isCurrent = current.providerId && current.modelId && `${current.providerId}/${current.modelId}` === m.id
-      return `${index + 1}. ${isCurrent ? "[当前] " : ""}${m.label}`
-    })
+    // 按 provider 分组
+    const grouped = new Map<string, typeof models>()
+    for (const m of models) {
+      const list = grouped.get(m.providerId) ?? []
+      list.push(m)
+      grouped.set(m.providerId, list)
+    }
 
-    return ["可用模型：", ...lines, "回复序号或 md <provider/model> 切换（60 秒内有效）"].join("\n")
+    const lines: string[] = []
+    let index = 0
+    for (const [provider, providerModels] of grouped) {
+      lines.push(`── ${provider} ──`)
+      for (const m of providerModels) {
+        index++
+        const isCurrent = current.providerId === m.providerId && current.modelId === m.modelId
+        lines.push(`${index}. ${isCurrent ? "[当前] " : ""}${m.modelId}`)
+      }
+    }
+
+    return ["全部兼容模型：", ...lines, `共 ${models.length} 个模型`, "回复序号或 md <provider/model> 切换（60 秒内有效）"].join("\n")
   }
 
   if (/^\d+$/.test(args)) {

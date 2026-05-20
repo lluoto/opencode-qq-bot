@@ -20,24 +20,33 @@ async function main(): Promise<void> {
   const appConfig = loadConfig()
 
   let serverClose: (() => void) | null = null
-  let embeddedBaseUrl = ""
+  let sharedBaseUrl = ""
 
-  const startEmbeddedServer = async (): Promise<void> => {
-    const { createOpencodeServer } = await import("@opencode-ai/sdk")
-    const server = await createOpencodeServer({ port: 4096 })
-    embeddedBaseUrl = server.url
-    serverClose = server.close
-    console.log(`[index] opencode serve 已启动: ${server.url}`)
+  const DEFAULT_URL = "http://localhost:4096"
+
+  // 先探测是否有已在运行的 OpenCode server
+  try {
+    const probe = createClient(DEFAULT_URL)
+    await healthCheck(probe)
+    sharedBaseUrl = DEFAULT_URL
+    console.log(`[index] 检测到已有 OpenCode server: ${DEFAULT_URL}`)
+  } catch {
+    // 不可达，稍后根据需要启动内嵌 server
   }
 
-  if (appConfig.bots.some((bot) => !bot.opencode.externalUrl)) {
-    await startEmbeddedServer()
+  const needsEmbedded = appConfig.bots.some((bot) => !bot.opencode.externalUrl)
+  if (needsEmbedded && !sharedBaseUrl) {
+    const { createOpencodeServer } = await import("@opencode-ai/sdk")
+    const server = await createOpencodeServer({ port: 4096 })
+    sharedBaseUrl = server.url
+    serverClose = server.close
+    console.log(`[index] opencode serve 已启动: ${server.url}`)
   }
 
   const runtimes: RuntimeControl[] = []
 
   for (const botConfig of appConfig.bots) {
-    const runtime = await startBotRuntime(botConfig, embeddedBaseUrl)
+    const runtime = await startBotRuntime(botConfig, sharedBaseUrl)
     runtimes.push(runtime)
   }
 

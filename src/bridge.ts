@@ -309,7 +309,11 @@ function waitForSessionReply(
 
   return new Promise<string>((resolve, reject) => {
     const timeoutId = setTimeout(() => {
-      finish(() => reject(new Error("AI 响应超时（5 分钟）")))
+      if (latestText) {
+        finish(() => resolve("任务仍在执行中（已超过 5 分钟），可发送消息询问进展"))
+      } else {
+        finish(() => reject(new Error("AI 响应超时（5 分钟）")))
+      }
     }, RESPONSE_TIMEOUT_MS)
 
     const finish = (done: () => void): void => {
