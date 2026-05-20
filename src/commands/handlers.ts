@@ -100,26 +100,12 @@ export async function handleModel(ctx: MessageContext, args: string, cmdCtx: Com
       expiresAt: Date.now() + SELECTION_TTL_MS,
     })
 
-    // 按 provider 分组
-    const grouped = new Map<string, typeof models>()
-    for (const m of models) {
-      const list = grouped.get(m.providerId) ?? []
-      list.push(m)
-      grouped.set(m.providerId, list)
-    }
+    const lines = models.map((m, index) => {
+      const isCurrent = current.providerId === m.providerId && current.modelId === m.modelId
+      return `${index + 1}. ${isCurrent ? "[当前] " : ""}${m.label}`
+    })
 
-    const lines: string[] = []
-    let index = 0
-    for (const [provider, providerModels] of grouped) {
-      lines.push(`── ${provider} ──`)
-      for (const m of providerModels) {
-        index++
-        const isCurrent = current.providerId === m.providerId && current.modelId === m.modelId
-        lines.push(`${index}. ${isCurrent ? "[当前] " : ""}${m.modelId}`)
-      }
-    }
-
-    return ["全部兼容模型：", ...lines, `共 ${models.length} 个模型`, "回复序号或 md <provider/model> 切换（60 秒内有效）"].join("\n")
+    return ["可用模型：", ...lines, "回复序号或 md <provider/model> 切换（60 秒内有效）"].join("\n")
   }
 
   if (/^\d+$/.test(args)) {
