@@ -86,9 +86,18 @@ export async function promptAsync(client: OpencodeClient, params: PromptParams):
 }
 
 export async function listProviderModels(client: OpencodeClient): Promise<AdapterModel[]> {
-  const result = await client.provider.list()
-  const data = (result.data ?? result) as unknown as Record<string, unknown>
-  const allProviders = Array.isArray(data.all) ? data.all as Record<string, unknown>[] : []
+  // 优先用 /config/providers（已有的配置列表），cuixi 等服务器上不会返回几千条
+  let result: unknown
+  try {
+    result = await (client as any).providers()
+  } catch {
+    result = await client.provider.list()
+  }
+
+  const data = (result as any)?.data ?? result as Record<string, unknown>
+  // /config/providers 直接就是 provider 数组
+  const rawProviders = Array.isArray(data) ? data : Array.isArray(data.all) ? data.all : []
+  const allProviders = rawProviders as Record<string, unknown>[]
   const models: AdapterModel[] = []
 
   for (const provider of allProviders) {
