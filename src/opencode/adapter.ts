@@ -1,5 +1,8 @@
 import type { OpencodeClient } from "./client.js"
 import type { Event } from "@opencode-ai/sdk"
+import { existsSync, readFileSync } from "fs"
+import { homedir } from "os"
+import { join } from "path"
 
 export interface AdapterSession {
   id: string
@@ -85,6 +88,38 @@ export async function promptAsync(client: OpencodeClient, params: PromptParams):
   })
 }
 
+const AUTH_FILE = join(homedir(), ".local", "share", "opencode", "auth.json")
+const CONFIG_FILE = join(homedir(), ".config", "opencode", "opencode.json")
+
+function getAuthorizedProviderIds(): Set<string> {
+  const ids = new Set<string>()
+
+  // 从 auth.json 里拿已授权的 provider
+  try {
+    if (existsSync(AUTH_FILE)) {
+      const auth = JSON.parse(readFileSync(AUTH_FILE, "utf-8"))
+      for (const key of Object.keys(auth)) {
+        ids.add(key.toLowerCase())
+      }
+    }
+  } catch { /* ignore */ }
+
+  // 从 opencode.json 里拿已配置的 provider
+  try {
+    if (existsSync(CONFIG_FILE)) {
+      const config = JSON.parse(readFileSync(CONFIG_FILE, "utf-8"))
+      const providers = config?.provider
+      if (providers && typeof providers === "object") {
+        for (const key of Object.keys(providers)) {
+          ids.add(key.toLowerCase())
+        }
+      }
+    }
+  } catch { /* ignore */ }
+
+  return ids
+}
+
 export async function listProviderModels(client: OpencodeClient): Promise<AdapterModel[]> {
   // 优先用 /config/providers（已有的配置列表），cuixi 等服务器上不会返回几千条
   let result: unknown
@@ -93,6 +128,8 @@ export async function listProviderModels(client: OpencodeClient): Promise<Adapte
   } catch {
     result = await client.provider.list()
   }
+
+  const authorizedIds = getAuthorizedProviderIds()
 
   const data = (result as any)?.data ?? result as Record<string, unknown>
   // /config/providers 直接就是 provider 数组
@@ -103,6 +140,9 @@ export async function listProviderModels(client: OpencodeClient): Promise<Adapte
   for (const provider of allProviders) {
     const providerId = typeof provider.id === "string" ? provider.id : undefined
     if (!providerId) continue
+
+    // 只显示已授权或已配置的 provider（auth.json / opencode.json 里有记录的）
+    if (authorizedIds.size > 0 && !authorizedIds.has(providerId.toLowerCase())) continue
 
     const rawModels = provider.models
     if (!rawModels || typeof rawModels !== "object") continue
