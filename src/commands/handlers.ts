@@ -93,28 +93,44 @@ export async function handleModel(ctx: MessageContext, args: string, cmdCtx: Com
       return "当前没有可用模型"
     }
 
+    // 去重：只列 provider，不展开模型
+    const providers = new Map<string, number>()
+    for (const m of models) {
+      providers.set(m.providerId, (providers.get(m.providerId) ?? 0) + 1)
+    }
+
     const current = cmdCtx.sessions.getModel(ctx.userId)
-    cmdCtx.pendingSelections.set(ctx.userId, {
-      type: "model",
-      items: models.map((m) => ({ id: m.id, label: m.label })),
-      expiresAt: Date.now() + SELECTION_TTL_MS,
-    })
+    const lines: string[] = []
+    let index = 0
+    for (const [provider, count] of providers) {
+      index++
+      const isCurrent = current.providerId === provider
+      lines.push(`${index}. ${isCurrent ? "[当前] " : ""}${provider} (${count} 个模型)`)
+    }
 
-    const lines = models.map((m, index) => {
-      const isCurrent = current.providerId === m.providerId && current.modelId === m.modelId
-      return `${index + 1}. ${isCurrent ? "[当前] " : ""}${m.label}`
-    })
-
-    return ["可用模型：", ...lines, "回复序号或 md <provider/model> 切换（60 秒内有效）"].join("\n")
+    return [
+      `可用 Provider（共 ${providers.size} 个）：`,
+      ...lines,
+      "回复 md <provider> 查看模型，或 md <provider/model> 直接切换",
+    ].join("\n")
   }
 
+  // 先尝试 provider/model 格式
+  const model = splitModelId(args)
+  if (model) {
+    await ensureSession(ctx.userId, cmdCtx)
+    cmdCtx.sessions.setModel(ctx.userId, model.providerId, model.modelId)
+    return `已切换模型：${model.providerId} / ${model.modelId}`
+  }
+
+  // 数字 → 从 pending 列表选择
   if (/^\d+$/.test(args)) {
     const pending = cmdCtx.pendingSelections.get(ctx.userId)
     if (!pending || pending.type !== "model") {
-      return "没有待选择的模型列表，请先发送 md 或 /model"
+      return "没有待选择的模型列表，请先发送 md <provider> 查看模型"
     }
     if (pending.expiresAt <= Date.now()) {
-      return "模型选择已过期，请重新发送 md 或 /model"
+      return "模型选择已过期，请重新发送 md <provider> 查看模型"
     }
     const selection = Number(args)
     const item = pending.items[selection - 1]
@@ -122,23 +138,41 @@ export async function handleModel(ctx: MessageContext, args: string, cmdCtx: Com
       return `序号无效，请回复 1-${pending.items.length}`
     }
     cmdCtx.pendingSelections.delete(ctx.userId)
-    const model = splitModelId(item.id)
-    if (!model) {
+    const sel = splitModelId(item.id)
+    if (!sel) {
       return `模型项无效：${item.label}`
     }
     await ensureSession(ctx.userId, cmdCtx)
-    cmdCtx.sessions.setModel(ctx.userId, model.providerId, model.modelId)
+    cmdCtx.sessions.setModel(ctx.userId, sel.providerId, sel.modelId)
     return `已切换模型：${item.label}`
   }
 
-  const model = splitModelId(args)
-  if (!model) {
-    return "模型格式不对，请使用 md <provider/model>"
+  // 列出指定 provider 下的模型
+  const allModels = await listProviderModels(cmdCtx.client)
+  const normalized = args.trim().toLowerCase()
+  const providerModels = allModels.filter((m) => m.providerId.toLowerCase() === normalized)
+
+  if (providerModels.length === 0) {
+    return `未找到 provider：${args.trim()}\n发送 md 查看所有 provider`
   }
 
-  await ensureSession(ctx.userId, cmdCtx)
-  cmdCtx.sessions.setModel(ctx.userId, model.providerId, model.modelId)
-  return `已切换模型：${model.providerId} / ${model.modelId}`
+  const current = cmdCtx.sessions.getModel(ctx.userId)
+  cmdCtx.pendingSelections.set(ctx.userId, {
+    type: "model",
+    items: providerModels.map((m) => ({ id: m.id, label: m.label })),
+    expiresAt: Date.now() + SELECTION_TTL_MS,
+  })
+
+  const lines = providerModels.map((m, index) => {
+    const isCurrent = current.providerId === m.providerId && current.modelId === m.modelId
+    return `${index + 1}. ${isCurrent ? "[当前] " : ""}${m.modelId}`
+  })
+
+  return [
+    `${args.trim()} 下的模型：`,
+    ...lines,
+    "回复序号切换（60 秒内有效）",
+  ].join("\n")
 }
 
 export async function handleAgent(ctx: MessageContext, args: string, cmdCtx: CommandContext): Promise<string> {
