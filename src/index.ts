@@ -119,7 +119,7 @@ async function startBotRuntime(config: Config, embeddedBaseUrl: string): Promise
     stop: () => {
       gateway.stop()
       router.stop()
-      stopBackgroundTokenRefresh(config.qq.appId)
+      stopBackgroundTokenRefresh()
     },
   }
 }
