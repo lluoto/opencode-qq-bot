@@ -120,7 +120,7 @@ export function createBridge(
         const session = await sessions.getOrCreate(ctx.userId)
         const baseUrl = process.env.OPENCODE_TUI_ATTACH_URL || "http://127.0.0.1:4096"
         console.log(`[bridge] Session: ${session.sessionId}`)
-        console.log(`[bridge] Web: ${baseUrl}/session/${session.sessionId}`)
+        console.log(`[bridge] 同步到 CLI 请执行: opencode attach ${baseUrl} -s ${session.sessionId}`)
         const model = sessions.getModel(ctx.userId)
         const agent = sessions.getAgent(ctx.userId)
         const effectiveAgent = isAgentAllowedForModel(agent, model.providerId, model.modelId) ? agent : undefined
