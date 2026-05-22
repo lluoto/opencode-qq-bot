@@ -24,20 +24,25 @@ async function main(): Promise<void> {
 
   const DEFAULT_URL = "http://localhost:4096"
 
-  // 先探测是否有已在运行的 OpenCode server
-  try {
-    const probe = createClient(DEFAULT_URL)
-    await healthCheck(probe)
-    sharedBaseUrl = DEFAULT_URL
-    console.log(`[index] 检测到已有 OpenCode server: ${DEFAULT_URL}`)
-  } catch {
-    // 不可达，稍后根据需要启动内嵌 server
+  // 先探测是否有已在运行的 OpenCode server（最多重试 3 次）
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const probe = createClient(DEFAULT_URL)
+      await healthCheck(probe)
+      sharedBaseUrl = DEFAULT_URL
+      console.log(`[index] 检测到已有 OpenCode server: ${DEFAULT_URL}`)
+      break
+    } catch {
+      if (attempt < 3) {
+        await new Promise((r) => setTimeout(r, 2000))
+      }
+    }
   }
 
   const needsEmbedded = appConfig.bots.some((bot) => !bot.opencode.externalUrl)
   if (needsEmbedded && !sharedBaseUrl) {
     const { createOpencodeServer } = await import("@opencode-ai/sdk")
-    const server = await createOpencodeServer({ port: 4096 })
+    const server = await createOpencodeServer({ port: 4096, timeout: 30000 })
     sharedBaseUrl = server.url
     serverClose = server.close
     console.log(`[index] opencode serve 已启动: ${server.url}`)
