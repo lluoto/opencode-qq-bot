@@ -63,6 +63,8 @@ export class EventRouter {
     switch (eventType) {
       case "message.part.updated":
         return properties.part?.sessionID
+      case "message.part.delta":
+        return properties.sessionID
       case "message.updated":
         return properties.info?.sessionID
       case "session.idle":

@@ -333,9 +333,25 @@ function waitForSessionReply(
 
       if (eventType === "message.part.updated") {
         const part = properties.part
-        if (part.type === "text") {
+        if (part.type === "text" || part.type === "reasoning") {
           latestText = part.text
+        } else if (part.type === "subtask" && part.prompt) {
+          latestText = part.prompt
         }
+        return
+      }
+
+      if (eventType === "message.part.delta") {
+        if (properties.field === "text" && properties.delta) {
+          latestText = (latestText || "") + properties.delta
+        }
+        return
+      }
+
+      if (eventType === "session.idle") {
+        // 过滤思考内容（DeepSeek 的推理标记）
+        const clean = latestText.replace(/<thinking>[\s\S]*?<\/thinking>/g, "").trim()
+        finish(() => resolve(clean || "(AI 未返回内容)"))
         return
       }
 
@@ -351,11 +367,6 @@ function waitForSessionReply(
             expiresAt: Date.now() + 10 * 60 * 1000,
           })
         }
-        return
-      }
-
-      if (eventType === "session.idle") {
-        finish(() => resolve(latestText || "(AI 未返回内容)"))
         return
       }
 
