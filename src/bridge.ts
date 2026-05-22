@@ -126,7 +126,7 @@ export function createBridge(
           void promptAsync(client, {
             sessionId: session.sessionId,
             text: content,
-            model: model.providerId && model.modelId && sessions.hasModelOverride(ctx.userId)
+            model: model.providerId && model.modelId
               ? { providerID: model.providerId, modelID: model.modelId }
               : undefined,
             agent: effectiveAgent,
@@ -283,7 +283,7 @@ async function maybeHandlePendingConfirmation(
       void promptAsync(client, {
         sessionId: pending.sessionId || session.sessionId,
         text: "Yes, confirm. Proceed exactly as previously requested, and do not use any other path.",
-        model: model.providerId && model.modelId && sessions.hasModelOverride(ctx.userId)
+        model: model.providerId && model.modelId
           ? { providerID: model.providerId, modelID: model.modelId }
           : undefined,
         agent: effectiveAgent,

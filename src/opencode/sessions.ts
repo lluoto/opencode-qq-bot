@@ -9,7 +9,6 @@ interface UserSession {
   modelId?: string
   providerId?: string
   agentId?: string
-  modelOverride: boolean  // 用户是否显式切换过模型
 }
 
 export class SessionManager {
@@ -28,7 +27,7 @@ export class SessionManager {
     if (existing) return existing
 
     const created = await createSession(this.client)
-    const session: UserSession = { sessionId: created.id, title: created.title, modelOverride: false }
+    const session: UserSession = { sessionId: created.id, title: created.title }
     this.sessions.set(userId, session)
     this.trackSession(userId, created.id, created.title)
     return session
@@ -36,7 +35,7 @@ export class SessionManager {
 
   async createNew(userId: string): Promise<UserSession> {
     const created = await createSession(this.client)
-    const session: UserSession = { sessionId: created.id, title: created.title, modelOverride: false }
+    const session: UserSession = { sessionId: created.id, title: created.title }
     this.sessions.set(userId, session)
     this.trackSession(userId, created.id, created.title)
     return session
@@ -51,7 +50,6 @@ export class SessionManager {
     this.sessions.set(userId, {
       providerId: current?.providerId,
       modelId: current?.modelId,
-      modelOverride: current?.modelOverride ?? false,
       sessionId,
       title,
     })
@@ -66,7 +64,6 @@ export class SessionManager {
     if (s) {
       s.providerId = providerId
       s.modelId = modelId
-      s.modelOverride = true
       if (!isAgentAllowedForModel(s.agentId, providerId, modelId)) {
         s.agentId = undefined
       }
@@ -86,10 +83,6 @@ export class SessionManager {
       providerId: s?.providerId ?? this.defaultModel?.providerId,
       modelId: s?.modelId ?? this.defaultModel?.modelId,
     }
-  }
-
-  hasModelOverride(userId: string): boolean {
-    return this.sessions.get(userId)?.modelOverride ?? false
   }
 
   getAgent(userId: string): string | undefined {
