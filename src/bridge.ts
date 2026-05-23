@@ -336,10 +336,13 @@ function waitForSessionReply(
 
       if (eventType === "message.part.updated") {
         const part = properties.part
-        if (part.type === "text" || part.type === "reasoning") {
+        if (part.type === "text") {
+          // 完整文本 part，覆盖 delta 累积
           latestText = part.text
+        } else if (part.type === "reasoning") {
+          // reasoning part：只缓存但不用于最终输出
         } else if (part.type === "subtask" && part.prompt) {
-          latestText = part.prompt
+          if (!latestText) latestText = part.prompt
         }
         return
       }
@@ -352,9 +355,13 @@ function waitForSessionReply(
       }
 
       if (eventType === "session.idle") {
-        // 过滤思考内容（DeepSeek 的推理标记）
-        const clean = latestText.replace(/<thinking>[\s\S]*?<\/thinking>/g, "").trim()
-        finish(() => resolve(clean || "(AI 未返回内容)"))
+        // 如果收到了 text 类型的 part.updated，latestText 已经是干净文本
+        // 否则从 delta 累积的文本中剥离首段（DeepSeek 的推理内容通常在第一段）
+        const lines = latestText.split("\n")
+        const filtered = lines.length > 3 && lines[0].length > 50 
+          ? lines.slice(1).join("\n").trim() 
+          : latestText
+        finish(() => resolve(filtered || "(AI 未返回内容)"))
         return
       }
 
