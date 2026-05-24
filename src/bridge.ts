@@ -134,6 +134,8 @@ export function createBridge(
               : undefined,
             agent: effectiveAgent,
           })
+        }, async (progressText) => {
+          await sendReply(ctx, progressText)
         }, async (permission) => {
           pendingPermissions.set(ctx.userId, permission)
           await sendReply(ctx, formatPermissionRequest(permission))
@@ -305,11 +307,14 @@ function waitForSessionReply(
   router: EventRouter,
   sessionId: string,
   startPrompt: () => void,
+  onProgress?: (text: string) => Promise<void>,
   onPermission?: (permission: PendingPermissionRequest) => Promise<void>,
 ): Promise<string> {
   let settled = false
   let latestText = ""
   let partTexts: Record<string, string> = {}
+  let lastProgressText = ""
+  let lastProgressAt = 0
 
   return new Promise<string>((resolve, reject) => {
     const timeoutId = setTimeout(() => {
@@ -348,10 +353,26 @@ function waitForSessionReply(
 
       if (eventType === "message.part.delta") {
         if (properties.field === "text" && properties.delta) {
-          // 按 partID 分别累积，区分推理和输出
           const pid = properties.partID
           if (!partTexts[pid]) partTexts[pid] = ""
           partTexts[pid] += properties.delta
+
+          // 进度推送：每 15 秒或累积 >100 字符有新进展时推送
+          if (onProgress) {
+            const allText = Object.values(partTexts).join("\n")
+            const now = Date.now()
+            const hasMeaningfulDelta = allText.length - lastProgressText.length >= 100 && allText.length >= 50
+            const canPushProgress = now - lastProgressAt >= 15000
+            if (hasMeaningfulDelta && canPushProgress) {
+              lastProgressText = allText
+              lastProgressAt = now
+              const pids = Object.keys(partTexts)
+              const displayText = pids.length > 1 ? partTexts[pids[pids.length - 1]] : allText
+              void onProgress(`${displayText}\n\n[处理中，任务仍在继续...]`).catch((err) => {
+                console.error("[bridge] progress reply failed:", err)
+              })
+            }
+          }
         }
         return
       }
