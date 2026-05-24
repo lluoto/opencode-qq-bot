@@ -22,7 +22,7 @@ async function main(): Promise<void> {
   let serverClose: (() => void) | null = null
   let sharedBaseUrl = ""
 
-  const DEFAULT_URL = "http://localhost:4096"
+  const DEFAULT_URL = "http://127.0.0.1:4096"
 
   // 先探测是否有已在运行的 OpenCode server（最多重试 3 次）
   for (let attempt = 1; attempt <= 3; attempt++) {
@@ -33,6 +33,9 @@ async function main(): Promise<void> {
       console.log(`[index] 检测到已有 OpenCode server: ${DEFAULT_URL}`)
       break
     } catch {
+      if (attempt === 3) {
+        console.log(`[index] 未检测到已有 server（尝试${attempt}次），将启动内嵌 server`)
+      }
       if (attempt < 3) {
         await new Promise((r) => setTimeout(r, 2000))
       }
