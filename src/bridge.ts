@@ -309,6 +309,7 @@ function waitForSessionReply(
 ): Promise<string> {
   let settled = false
   let latestText = ""
+  let partTexts: Record<string, string> = {}
 
   return new Promise<string>((resolve, reject) => {
     const timeoutId = setTimeout(() => {
@@ -336,11 +337,9 @@ function waitForSessionReply(
 
       if (eventType === "message.part.updated") {
         const part = properties.part
+        console.log(`[bridge] UPDATED type=${part.type} len=${part.text?.length}`)
         if (part.type === "text") {
-          // 完整文本 part，覆盖 delta 累积
           latestText = part.text
-        } else if (part.type === "reasoning") {
-          // reasoning part：只缓存但不用于最终输出
         } else if (part.type === "subtask" && part.prompt) {
           if (!latestText) latestText = part.prompt
         }
@@ -349,19 +348,24 @@ function waitForSessionReply(
 
       if (eventType === "message.part.delta") {
         if (properties.field === "text" && properties.delta) {
-          latestText = (latestText || "") + properties.delta
+          // 按 partID 分别累积，区分推理和输出
+          const pid = properties.partID
+          if (!partTexts[pid]) partTexts[pid] = ""
+          partTexts[pid] += properties.delta
         }
         return
       }
 
       if (eventType === "session.idle") {
-        // 如果收到了 text 类型的 part.updated，latestText 已经是干净文本
-        // 否则从 delta 累积的文本中剥离首段（DeepSeek 的推理内容通常在第一段）
-        const lines = latestText.split("\n")
-        const filtered = lines.length > 3 && lines[0].length > 50 
-          ? lines.slice(1).join("\n").trim() 
-          : latestText
-        finish(() => resolve(filtered || "(AI 未返回内容)"))
+        // 如果有 updated text 事件，直接用
+        if (latestText) {
+          finish(() => resolve(latestText))
+          return
+        }
+        // 否则从 partTexts 里取最后一个 part 的文本（即 text part，非 reasoning）
+        const pids = Object.keys(partTexts)
+        const lastText = pids.length > 0 ? partTexts[pids[pids.length - 1]] : ""
+        finish(() => resolve(lastText.trim() || "(AI 未返回内容)"))
         return
       }
 
