@@ -9,6 +9,7 @@ import { SessionManager } from "./opencode/sessions.js"
 import { startGateway } from "./qq/gateway.js"
 import { startBackgroundTokenRefresh, stopBackgroundTokenRefresh } from "./qq/token.js"
 import { createBridge } from "./bridge.js"
+import { checkSystemTime } from "./system-time.js"
 
 interface RuntimeControl {
   botId: string
@@ -18,6 +19,18 @@ interface RuntimeControl {
 async function main(): Promise<void> {
   await ensureConfig()
   const appConfig = loadConfig()
+
+  // 系统时间检测：在建立任何 HTTPS 连接前检查时钟偏差，
+  // 防止因本地时间错误导致 SSL 证书 "not yet valid" 错误
+  const timeCheck = await checkSystemTime()
+  if (!timeCheck.ok) {
+    console.error(
+      `[index] ⚠ 系统时间偏差 ${timeCheck.driftSeconds} 秒，` +
+      `继续启动可能导致 AI 请求因 SSL 证书验证失败\n` +
+      `[index]   请校准系统时间后再试（设置 -> 时间与语言 -> 日期和时间 -> 自动设置时间）`
+    )
+    // 不阻断启动，但打印醒目警告
+  }
 
   let serverClose: (() => void) | null = null
   let sharedBaseUrl = ""
