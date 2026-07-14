@@ -2,8 +2,7 @@
 // @output: startGateway, MessageHandler
 // @pos:    qq层 - QQ Bot WebSocket Gateway 状态机 (心跳/重连/消息分发)
 import WebSocket from "ws"
-import { clearTokenCache, getAccessToken } from "./token.js"
-import { getGatewayUrl } from "./http.js"
+import { clearTokenCache, getAccessToken, getGatewayUrl } from "./api.js"
 import type {
   C2CMessageEvent,
   GatewayHelloData,
@@ -13,18 +12,12 @@ import type {
   WSPayload,
 } from "./types.js"
 
-const GROUP_AND_C2C_EVENT_INTENT = 1 << 25
+const GROUP_AND_C2C_EVENT_INTENT = (1 << 25) | (1 << 0)
 const MAX_RECONNECT_DELAY_MS = 30_000
 const BASE_RECONNECT_DELAY_MS = 1_000
 const INVALID_SESSION_DELAY_MS = 3_000
 const RESUME_RESET_CLOSE_CODES = new Set([4006, 4007, 4009])
-// 4914: 机器人已下架，只允许连接沙箱环境
-// 4915: 机器人已封禁，不允许连接
-// 官方文档: https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/error-trace/websocket.html
-const FATAL_CLOSE_CODES: Record<number, string> = {
-  4914: "机器人已下架，只允许连接沙箱环境，请在 QQ 开放平台检查机器人状态",
-  4915: "机器人已封禁，不允许连接，请在 QQ 开放平台申请解封",
-}
+const FATAL_CLOSE_CODES = new Set([4914, 4915])
 
 export type MessageHandler = (msg: MessageContext) => Promise<void>
 
@@ -116,6 +109,7 @@ function startHeartbeat(state: GatewayState, intervalMs: number): void {
 
     // 如果上一个心跳一直没收到 ACK，直接断线重连
     if (!state.heartbeatAcked) {
+      console.log("[qq-gateway] 心跳超时未收到ACK，断开重连")
       ws.terminate()
       return
     }
@@ -170,6 +164,7 @@ async function refreshGatewayAuth(options: GatewayOptions, state: GatewayState):
 }
 
 function sendIdentify(ws: WebSocket, accessToken: string): void {
+  console.log("[qq-gateway] 发送 Identify 认证")
   const payload: WSPayload<{
     token: string
     intents: number
@@ -217,6 +212,7 @@ async function handleDispatchEvent(
   switch (payload.t) {
     case "READY": {
       const readyData = payload.d as GatewayReadyData
+      console.log(`[qq-gateway] 收到 READY, session=${readyData.session_id}, user=${JSON.stringify(readyData.user?.id)}`)
       state.sessionId = readyData.session_id
       state.reconnectAttempt = 0
       options.onReady?.()
@@ -230,6 +226,7 @@ async function handleDispatchEvent(
 
     case "C2C_MESSAGE_CREATE": {
       const message = toC2CMessageContext(payload.d as C2CMessageEvent)
+      console.log(`[qq-gateway] 收到C2C消息: user=${message.userId}, content=${message.content.substring(0, 50)}`)
       if (!message.content) {
         return
       }
@@ -266,6 +263,7 @@ async function handlePayload(
     case 10: {
       // Hello：建立心跳，并根据有无 session 决定 Identify/Resume
       const hello = payload.d as GatewayHelloData
+      console.log(`[qq-gateway] 收到 HELLO, 心跳间隔=${hello.heartbeat_interval}ms`)
       startHeartbeat(state, hello.heartbeat_interval)
 
       if (state.accessToken && state.sessionId && state.seq !== null) {
@@ -342,6 +340,7 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayCont
       state.ws = ws
 
       ws.on("open", () => {
+        console.log("[qq-gateway] WebSocket 已连接")
         state.connecting = false
       })
 
@@ -357,6 +356,7 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayCont
       })
 
       ws.on("close", (code) => {
+        console.log(`[qq-gateway] WebSocket 断开: code=${code}`)
         state.connecting = false
         cleanupSocket(state)
 
@@ -375,9 +375,8 @@ export async function startGateway(options: GatewayOptions): Promise<GatewayCont
           state.accessToken = null
         }
 
-        if (code in FATAL_CLOSE_CODES) {
-          console.error(`[qq-gateway] 致命错误 (${code}): ${FATAL_CLOSE_CODES[code]}`)
-          process.exit(1)
+        if (FATAL_CLOSE_CODES.has(code)) {
+          return
         }
 
         scheduleReconnect(state, connect)

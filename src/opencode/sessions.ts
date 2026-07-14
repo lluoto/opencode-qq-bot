@@ -1,5 +1,7 @@
+// @input:  ./client (OpencodeClient)
+// @output: SessionManager, UserSession
+// @pos:    opencode层 - QQ用户<->OpenCode Session 映射管理
 import type { OpencodeClient } from "./client.js"
-import { createSession } from "./adapter.js"
 
 interface UserSession {
   sessionId: string
@@ -9,36 +11,53 @@ interface UserSession {
   agentId?: string
 }
 
+const DEFAULT_PROVIDER_ID = "deepseek"
+const DEFAULT_MODEL_ID = "deepseek-chat"
+
 export class SessionManager {
   private sessions = new Map<string, UserSession>()
-  private userSessionHistory = new Map<string, Array<{ id: string; title: string }>>()
   private client: OpencodeClient
+  private defaultProviderId: string
+  private defaultModelId: string
 
-  constructor(client: OpencodeClient) {
+  constructor(client: OpencodeClient, defaultModel?: string) {
     this.client = client
+    if (defaultModel) {
+      const [provider, model] = defaultModel.split("/")
+    this.defaultProviderId = provider || DEFAULT_PROVIDER_ID
+    this.defaultModelId = model || DEFAULT_MODEL_ID
+    console.log(`[sessions] Default model: ${this.defaultProviderId}/${this.defaultModelId}`)
+    } else {
+      this.defaultProviderId = DEFAULT_PROVIDER_ID
+      this.defaultModelId = DEFAULT_MODEL_ID
+    }
   }
 
   async getOrCreate(userId: string): Promise<UserSession> {
     const existing = this.sessions.get(userId)
     if (existing) return existing
 
-    const created = await createSession(this.client)
-    const session: UserSession = { sessionId: created.id, title: created.title }
+    const result = await this.client.session.create({})
+    const session: UserSession = {
+      sessionId: result.data!.id,
+      title: result.data!.title,
+      providerId: this.defaultProviderId,
+      modelId: this.defaultModelId,
+    }
     this.sessions.set(userId, session)
-    this.trackSession(userId, created.id, created.title)
     return session
   }
 
   async createNew(userId: string): Promise<UserSession> {
-    const created = await createSession(this.client)
-    const session: UserSession = { sessionId: created.id, title: created.title }
+    const result = await this.client.session.create({})
+    const session: UserSession = {
+      sessionId: result.data!.id,
+      title: result.data!.title,
+      providerId: this.defaultProviderId,
+      modelId: this.defaultModelId,
+    }
     this.sessions.set(userId, session)
-    this.trackSession(userId, created.id, created.title)
     return session
-  }
-
-  getUserSessions(userId: string): Array<{ id: string; title: string }> {
-    return this.userSessionHistory.get(userId) ?? []
   }
 
   switchSession(userId: string, sessionId: string, title?: string): void {
@@ -75,26 +94,6 @@ export class SessionManager {
 
   getAgent(userId: string): string | undefined {
     return this.sessions.get(userId)?.agentId
-  }
-
-  updateSessionTitle(userId: string, sessionId: string, title: string): void {
-    const history = this.userSessionHistory.get(userId)
-    if (history) {
-      const entry = history.find((h) => h.id === sessionId)
-      if (entry) entry.title = title
-    }
-    const current = this.sessions.get(userId)
-    if (current && current.sessionId === sessionId) {
-      current.title = title
-    }
-  }
-
-  private trackSession(userId: string, sessionId: string, title: string): void {
-    const history = this.userSessionHistory.get(userId) ?? []
-    if (!history.some((h) => h.id === sessionId)) {
-      history.push({ id: sessionId, title })
-      this.userSessionHistory.set(userId, history)
-    }
   }
 }
 
