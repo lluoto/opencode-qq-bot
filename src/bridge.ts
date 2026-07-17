@@ -222,6 +222,17 @@ async function waitForSessionReply(
   let connectRetryCount = 0
   let lastProgressText = ""
   let lastProgressAt = 0
+  let thinkCount = 0
+  const thinkStartTime = Date.now()
+
+  function formatProgress(text: string): string {
+    thinkCount++
+    const elapsed = Math.floor((Date.now() - thinkStartTime) / 1000)
+    const mins = Math.floor(elapsed / 60)
+    const secs = elapsed % 60
+    const ts = `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+    return `[思考 #${thinkCount} +${ts}]\n${text}`
+  }
 
   return new Promise<string>((resolve, reject) => {
     let timeoutCount = 0
@@ -243,7 +254,7 @@ async function waitForSessionReply(
         }
         console.log(`[bridge] Timeout round ${timeoutCount}/${maxTimeoutCount}, sending progress note`)
         if (onProgress && latestText.trim()) {
-          void onProgress(`${latestText}\n\n[处理中，已等待 ${TIMEOUT_MINUTES} 分钟，任务仍在继续...]`)
+            void onProgress(formatProgress(`${latestText}\n\n[处理中，已等待 ${TIMEOUT_MINUTES} 分钟，任务仍在继续...]`))
         }
         scheduleTimeout()
       }, RESPONSE_TIMEOUT_MS)
@@ -263,7 +274,7 @@ async function waitForSessionReply(
           }
           console.log(`[bridge] Timeout round ${timeoutCount}/${maxTimeoutCount}, sending progress note`)
           if (onProgress && latestText.trim()) {
-            void onProgress(`${latestText}\n\n[处理中，已等待 ${TIMEOUT_MINUTES} 分钟，任务仍在继续...]`)
+              void onProgress(formatProgress(`${latestText}\n\n[处理中，已等待 ${TIMEOUT_MINUTES} 分钟，任务仍在继续...]`))
           }
           scheduleTimeout()
         }, RESPONSE_TIMEOUT_MS)
@@ -299,21 +310,30 @@ async function waitForSessionReply(
       
       if (event.type === "message.part.updated") {
         const part = event.properties.part as any
-        if ((part.type === "text" || part.type === "reasoning") && part.messageID === assistantMessageId) {
-          latestText = part.text
-          console.log("[bridge] Text updated:", latestText.substring(0, 100))
+        if (part.type === "text" || part.type === "reasoning") {
+          // Capture ALL text/reasoning parts — sub-agents have different messageIDs
+          // than the primary assistant message, so filtering by messageID drops them
+          if (!assistantMessageId) {
+            assistantMessageId = part.messageID
+          }
+          const text = part.text || ""
+          console.log("[bridge] Part updated:", part.type, "msgID:", part.messageID, "text:", text.substring(0, 80))
           resetActivityTimeout()
 
-          const now = Date.now()
-          const hasMeaningfulDelta = latestText.trim().length >= 30 && latestText !== lastProgressText
-          const canPushProgress = now - lastProgressAt >= 8000
-          if (onProgress && hasMeaningfulDelta && canPushProgress) {
-            lastProgressText = latestText
-            lastForwardedProgressText = latestText
-            lastProgressAt = now
-            void onProgress(`${latestText}\n\n[处理中...]`).catch((error) => {
-              console.error("[bridge] failed to send progress reply:", error)
-            })
+          // Accumulate reasoning/text separately for progress display
+          if (text.trim()) {
+            latestText = text
+            const now = Date.now()
+            const hasMeaningfulDelta = text.trim().length >= 30 && text !== lastProgressText
+            const canPushProgress = now - lastProgressAt >= 8000
+            if (onProgress && hasMeaningfulDelta && canPushProgress) {
+              lastProgressText = text
+              lastForwardedProgressText = text
+              lastProgressAt = now
+              void onProgress(formatProgress(`${text}\n\n[处理中...]`)).catch((error) => {
+                console.error("[bridge] failed to send progress reply:", error)
+              })
+            }
           }
         }
         return
@@ -343,7 +363,13 @@ async function waitForSessionReply(
 
       if (event.type === "session.idle") {
         console.log("[bridge] Session idle received!")
-        const finalText = latestText === lastForwardedProgressText ? "" : (latestText || "(AI 未返回内容)")
+        if (!latestText.trim()) {
+          // Don't resolve yet — wait for message.part.updated to deliver text
+          // The 2-second timer from startPrompt().then() will handle eventual timeout
+          console.log("[bridge] Idle with empty text, waiting for content...")
+          return
+        }
+        const finalText = latestText === lastForwardedProgressText ? "" : latestText
         finish(() => resolve(finalText))
         return
       }
@@ -360,30 +386,37 @@ async function waitForSessionReply(
       .then(() => startPrompt())
       .then((result) => {
         console.log("[bridge] Prompt started for session:", sessionId)
-        // Extract text from prompt result — fallback if events never fire (session.idle missing)
-        if (!latestText.trim() && result?.data?.parts) {
-          const textParts = result.data.parts.filter((p: any) => p.type === "text" && p.text)
-          const reasoningParts = result.data.parts.filter((p: any) => p.type === "reasoning" && p.text)
-          const extracted = textParts.length > 0
-            ? textParts.map((p: any) => p.text).join("\n")
-            : reasoningParts.map((p: any) => p.text).join("\n")
-          if (extracted.trim()) {
-            latestText = extracted
-            console.log("[bridge] Extracted text from prompt result (no events received)")
-            // Send extracted text as progress to QQ immediately
-            if (onProgress && reasoningParts.length > 0 && textParts.length === 0) {
-              void onProgress(`思考：${reasoningParts.map((p: any) => p.text).join("\n")}\n\n[处理中...]`)
-            }
+        // Extract text from prompt result
+        const parts = result?.data?.parts
+        const textParts = Array.isArray(parts) ? parts.filter((p: any) => p.type === "text" && p.text) : []
+        const reasoningParts = Array.isArray(parts) ? parts.filter((p: any) => p.type === "reasoning" && p.text) : []
+        const extracted = textParts.length > 0
+          ? textParts.map((p: any) => p.text).join("\n")
+          : reasoningParts.map((p: any) => p.text).join("\n")
+
+        if (settled) {
+          // Timeout fired first — promise already resolved. Send result as follow-up message.
+          if (extracted.trim() && onProgress) {
+            console.log("[bridge] Timeout already resolved, sending late result as progress")
+            void onProgress(formatProgress(`${extracted}\n\n[处理完成]`)).catch((error) => {
+              console.error("[bridge] failed to send late result:", error)
+            })
           }
+          return
+        }
+
+        if (!latestText.trim() && extracted.trim()) {
+          latestText = extracted
+          console.log("[bridge] Extracted text from prompt result (no events received)")
         }
         // Wait up to 2s for event-sourced text to arrive, then resolve
         let resolved = false
-        const tryResolve = () => {
+        const resolveNow = (text: string) => {
           if (resolved) return
           resolved = true
           finish(() => resolve(latestText || "(AI 未返回内容)"))
         }
-        setTimeout(tryResolve, 2000)
+        setTimeout(() => resolveNow(), 2000)
       })
       .catch((error) => {
         console.error("[bridge] startPrompt threw:", error)
