@@ -305,6 +305,7 @@ async function listSessions(client: OpencodeClient): Promise<ListedSession[]> {
   const items = rawItems.length > 0 ? rawItems : extractArray(extractProperty(result, "data"))
 
   return items
+    .filter((item) => !(item as any).parentID && !(item as any).parentId)
     .map((item) => {
       const id = getString(item, "id")
       if (!id) {
@@ -329,10 +330,10 @@ async function listModels(client: OpencodeClient): Promise<ListedModel[]> {
   const models: ListedModel[] = []
 
   for (const provider of resolvedProviders) {
-    const providerId = getString(provider, "id") ?? getString(provider, "providerID")
+    const providerId = getString(provider, "providerID") ?? getString(provider, "id")
     const rawModels = extractArray(extractProperty(provider, "models"))
     for (const model of rawModels) {
-      const modelId = getString(model, "id") ?? getString(model, "modelID")
+      const modelId = getString(model, "modelID") ?? getString(model, "id")
       if (!providerId || !modelId) {
         continue
       }

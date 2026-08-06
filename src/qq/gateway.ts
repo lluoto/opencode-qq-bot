@@ -24,6 +24,7 @@ export type MessageHandler = (msg: MessageContext) => Promise<void>
 export interface GatewayOptions {
   appId: string
   clientSecret: string
+  sandbox: boolean
   onMessage: MessageHandler
   onReady?: () => void
 }
@@ -158,7 +159,7 @@ function toGroupMessageContext(event: GroupMessageEvent): MessageContext {
 
 async function refreshGatewayAuth(options: GatewayOptions, state: GatewayState): Promise<{ accessToken: string; gatewayUrl: string }> {
   const accessToken = await getAccessToken(options.appId, options.clientSecret)
-  const gatewayUrl = await getGatewayUrl(accessToken)
+  const gatewayUrl = await getGatewayUrl(accessToken, options.sandbox)
   state.accessToken = accessToken
   return { accessToken, gatewayUrl }
 }

@@ -44,18 +44,20 @@ async function startServer(): Promise<boolean> {
     }
     console.log("[index] OpenCode 连接成功")
 
-    // 清理旧 session（服务器重启后恢复的旧会话）
+    // 清理子 agent session（parentID 不为空的），保留用户会话
     try {
       const sessions = await client.session.list()
-      if (sessions.data?.length > 0) {
-        console.log(`[index] 发现 ${sessions.data.length} 个旧会话，清理中...`)
-        for (const s of sessions.data) {
+      const items = sessions.data ?? []
+      const subSessions = (items as any[]).filter((s: any) => s.parentID || s.parentId)
+      if (subSessions.length > 0) {
+        console.log(`[index] 清理 ${subSessions.length} 个子 agent 会话 (共 ${items.length} 个)`)
+        for (const s of subSessions) {
           try { await client.session.abort({ path: { id: s.id } }) } catch {}
         }
-        console.log("[index] 旧会话已清理")
+        console.log("[index] 子 agent 会话已清理")
       }
-    } catch (e) {
-      console.log("[index] 跳过会话清理:", e.message)
+    } catch (e: any) {
+      console.log("[index] 跳过会话清理:", e?.message ?? e)
     }
 
     router = new EventRouter(client)
@@ -83,12 +85,14 @@ async function startServer(): Promise<boolean> {
     // 为每个 bot 启动 gateway
     const gateways: any[] = []
     for (const bot of bots) {
+      const botConfig = { appId: bot.appId, clientSecret: bot.clientSecret, sandbox: bot.sandbox || false }
       const botSessions = new SessionManager(client, bot.defaultModel || undefined)
-      const botBridge = createBridge(config, client, router, botSessions)
+      const botBridge = createBridge(config, client, router, botSessions, botConfig)
 
       const botGateway = await startGateway({
         appId: bot.appId,
         clientSecret: bot.clientSecret,
+        sandbox: botConfig.sandbox,
         onMessage: botBridge.handleMessage,
         onReady: () => {
           console.log(`[index] QQ Gateway 已就绪 (${bot.appId})`)
@@ -141,6 +145,15 @@ async function main(): Promise<void> {
   await ensureConfig()
   config = loadConfig()
 
+  // 崩溃防护：bun 默认遇到 unhandledRejection 直接退出进程。
+  // 任何一次遗漏的 Promise catch 都会让整个 bot 消失——这里兜底记录日志。
+  process.on("unhandledRejection", (reason) => {
+    console.error("[index] unhandledRejection:", reason instanceof Error ? reason.stack ?? reason.message : String(reason))
+  })
+  process.on("uncaughtException", (error) => {
+    console.error("[index] uncaughtException:", error.stack ?? error.message)
+  })
+
   const started = await startServer()
   if (!started) {
     console.error("[index] 初始启动失败，5秒后重试...")
@@ -185,6 +198,19 @@ async function main(): Promise<void> {
       }
     }
   }, 30000)
+
+  // 内存看门狗：Windows 检测到虚拟内存耗尽会强杀进程（历史根因）。
+  // bot 自身堆超过 6GB 时主动重启，避免被系统 OOM-kill 导致孤儿进程。
+  const MEMORY_WATCH_INTERVAL_MS = 60_000
+  const MEMORY_LIMIT_BYTES = 6 * 1024 * 1024 * 1024
+  setInterval(() => {
+    if (isShuttingDown) return
+    const mem = process.memoryUsage().rss
+    if (mem > MEMORY_LIMIT_BYTES) {
+      console.error(`[index] 内存超过 ${MEMORY_LIMIT_BYTES / 1e9}GB (${(mem / 1e9).toFixed(2)}GB)，主动重启避免被系统强杀`)
+      restartServer()
+    }
+  }, MEMORY_WATCH_INTERVAL_MS)
 }
 
 main().catch((error) => {

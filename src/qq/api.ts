@@ -5,6 +5,13 @@
 const API_BASE = process.env.QQ_SANDBOX === "true"
   ? "https://sandbox.api.sgroup.qq.com"
   : "https://api.sgroup.qq.com"
+
+function getApiBase(sandbox?: boolean): string {
+  if (sandbox !== undefined) {
+    return sandbox ? "https://sandbox.api.sgroup.qq.com" : "https://api.sgroup.qq.com"
+  }
+  return API_BASE
+}
 const TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken"
 
 let cachedToken: { token: string; expiresAt: number; appId: string } | null = null
@@ -143,8 +150,9 @@ export async function apiRequest<T = unknown>(
   path: string,
   body?: unknown,
   timeoutMs?: number,
+  sandbox?: boolean,
 ): Promise<T> {
-  const url = `${API_BASE}${path}`
+  const url = `${getApiBase(sandbox)}${path}`
   const headers: Record<string, string> = {
     Authorization: `QQBot ${accessToken}`,
     "Content-Type": "application/json",
@@ -222,8 +230,8 @@ export async function apiRequest<T = unknown>(
 /**
  * 获取 WebSocket Gateway 地址。
  */
-export async function getGatewayUrl(accessToken: string): Promise<string> {
-  const data = await apiRequest<{ url: string }>(accessToken, "GET", "/gateway")
+export async function getGatewayUrl(accessToken: string, sandbox?: boolean): Promise<string> {
+  const data = await apiRequest<{ url: string }>(accessToken, "GET", "/gateway", undefined, undefined, sandbox)
   return data.url
 }
 
@@ -267,10 +275,11 @@ export async function sendC2CMessage(
   content: string,
   msgId?: string,
   msgSeq?: number,
+  sandbox?: boolean,
 ): Promise<MessageResponse> {
   const resolvedMsgSeq = msgSeq ?? (msgId ? getNextMsgSeq(msgId) : 1)
   const body = buildMessageBody(content, msgId, resolvedMsgSeq)
-  return apiRequest(accessToken, "POST", `/v2/users/${openid}/messages`, body)
+  return apiRequest(accessToken, "POST", `/v2/users/${openid}/messages`, body, undefined, sandbox)
 }
 
 /**
@@ -281,6 +290,7 @@ export async function sendC2CInputNotify(
   openid: string,
   msgId?: string,
   inputSecond: number = 60,
+  sandbox?: boolean,
 ): Promise<void> {
   const msgSeq = msgId ? getNextMsgSeq(msgId) : 1
   const body = {
@@ -293,7 +303,7 @@ export async function sendC2CInputNotify(
     ...(msgId ? { msg_id: msgId } : {}),
   }
 
-  await apiRequest(accessToken, "POST", `/v2/users/${openid}/messages`, body)
+  await apiRequest(accessToken, "POST", `/v2/users/${openid}/messages`, body, undefined, sandbox)
 }
 
 /**
@@ -306,10 +316,11 @@ export async function sendGroupMessage(
   content: string,
   msgId?: string,
   msgSeq?: number,
+  sandbox?: boolean,
 ): Promise<MessageResponse> {
   const resolvedMsgSeq = msgSeq ?? (msgId ? getNextMsgSeq(msgId) : 1)
   const body = buildMessageBody(content, msgId, resolvedMsgSeq)
-  return apiRequest(accessToken, "POST", `/v2/groups/${groupOpenid}/messages`, body)
+  return apiRequest(accessToken, "POST", `/v2/groups/${groupOpenid}/messages`, body, undefined, sandbox)
 }
 
 interface BackgroundTokenRefreshOptions {

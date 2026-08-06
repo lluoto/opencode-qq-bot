@@ -39,6 +39,7 @@ export function createBridge(
   client: OpencodeClient,
   router: EventRouter,
   sessions: SessionManager,
+  botConfig?: { appId: string; clientSecret: string; sandbox: boolean },
 ): Bridge {
   const busyUsers = new Set<string>()
   const greeted = new Set<string>()
@@ -51,6 +52,10 @@ export function createBridge(
     getAccessToken: () => getAccessToken(config.qq.appId, config.qq.clientSecret),
     pendingSelections,
   }
+
+  const botAppId = botConfig?.appId ?? config.qq.appId
+  const botClientSecret = botConfig?.clientSecret ?? config.qq.clientSecret
+  const botSandbox = botConfig?.sandbox ?? config.qq.sandbox
 
   const handleMessage = async (ctx: MessageContext): Promise<void> => {
     try {
@@ -150,8 +155,8 @@ export function createBridge(
   }
 
   async function sendReply(ctx: MessageContext, text: string): Promise<void> {
-    const accessToken = await getAccessToken(config.qq.appId, config.qq.clientSecret)
-    await replyToQQ(accessToken, ctx, text, config.maxReplyLength)
+    const accessToken = await getAccessToken(botAppId, botClientSecret)
+    await replyToQQ(accessToken, ctx, text, config.maxReplyLength, botSandbox)
   }
 
   return {
@@ -217,7 +222,6 @@ async function waitForSessionReply(
   let settled = false
   let latestText = ""
   let lastForwardedProgressText = ""
-  let events: any[] = []
   let assistantMessageId = ""
   let connectRetryCount = 0
   let lastProgressText = ""
@@ -234,9 +238,52 @@ async function waitForSessionReply(
     return `[思考 #${thinkCount} +${ts}]\n${text}`
   }
 
+  // 追踪每个 text/reasoning part 的累积文本。
+  // 服务器 1.18+ 的 message.part.updated 只在 part 创建(空文本)和完成(全量)时触发，
+  // 流式 token 全部通过 message.part.delta 推送，必须按 partID 累积。
+  const partTexts = new Map<string, { type: string; text: string }>()
+
+  const pushProgressIfNeeded = (text: string): void => {
+    const now = Date.now()
+    const hasMeaningfulDelta = text.trim().length >= 30 && text !== lastProgressText
+    const canPushProgress = now - lastProgressAt >= 8000
+    if (!onProgress || !hasMeaningfulDelta || !canPushProgress) return
+    lastProgressText = text
+    lastForwardedProgressText = text
+    lastProgressAt = now
+    const nowElapsed = Math.floor((Date.now() - thinkStartTime) / 1000)
+    const nowMins = Math.floor(nowElapsed / 60)
+    const nowSecs = nowElapsed % 60
+    const nowTs = `${String(nowMins).padStart(2, "0")}:${String(nowSecs).padStart(2, "0")}`
+    void onProgress(formatProgress(`${text}\n\n[运行中 +${nowTs}]`)).catch((error) => {
+      console.error("[bridge] failed to send progress reply:", error)
+    })
+  }
+
+  // 从所有已累积 part 中选出最完整的文本作为最终结果：
+  // text 优先于 reasoning，同类型取长度最大者
+  const getBestAccumulatedText = (): string => {
+    let best: { type: string; text: string } | null = null
+    for (const entry of partTexts.values()) {
+      if (!entry.text.trim()) continue
+      if (!best) {
+        best = entry
+        continue
+      }
+      const entryScore = entry.type === "text" ? 1 : 0
+      const bestScore = best.type === "text" ? 1 : 0
+      if (entryScore > bestScore || (entryScore === bestScore && entry.text.length > best.text.length)) {
+        best = entry
+      }
+    }
+    return best?.text ?? ""
+  }
+
   return new Promise<string>((resolve, reject) => {
     let timeoutCount = 0
-    const maxTimeoutCount = 3
+    // 超时仅作保底 log，不截断 resolve
+    // 正常完成由 session.idle / session.error / prompt().then() 驱动
+    // 心跳每60s推 [运行中 +MM:SS] 告知用户"还在运行"
 
     let currentTimeoutId: ReturnType<typeof setTimeout> | null = null
 
@@ -246,19 +293,58 @@ async function waitForSessionReply(
       }
       currentTimeoutId = setTimeout(() => {
         timeoutCount++
-        if (timeoutCount >= maxTimeoutCount) {
-          console.log("[bridge] TIMEOUT! latestText so far:", latestText.substring(0, 200))
-          // Don't abort — let model finish. Just resolve with what we have
-          finish(() => resolve(latestText.trim() || "(AI 思考时间过长，请稍后再试或切换更快的模型)"))
-          return
-        }
-        console.log(`[bridge] Timeout round ${timeoutCount}/${maxTimeoutCount}, sending progress note`)
-        if (onProgress && latestText.trim()) {
-            void onProgress(formatProgress(`${latestText}\n\n[处理中，已等待 ${TIMEOUT_MINUTES} 分钟，任务仍在继续...]`))
+        if (timeoutCount <= 15) {
+          // 0~30分钟：前3轮静默，之后每2分钟log一次
+          if (timeoutCount > 3) {
+            console.log(`[bridge] Timeout round ${timeoutCount} (${timeoutCount * 2}min)`)
+          }
+        } else {
+          // 30分钟以上：每5轮（10分钟）log一次
+          if (timeoutCount % 5 === 0) {
+            console.log(`[bridge] Timeout round ${timeoutCount} (${timeoutCount * 2}min) — still waiting for AI...`)
+          }
         }
         scheduleTimeout()
       }, RESPONSE_TIMEOUT_MS)
     }
+
+    // Heartbeat: send periodic status to keep user informed
+    // 0~30分钟：每60秒一次；30分钟以上：每10分钟一次（降低刷屏）
+    const HEARTBEAT_FAST = 60_000
+    const HEARTBEAT_SLOW = 600_000
+    const SLOW_AFTER_MS = 30 * 60 * 1000
+    let heartbeatId: ReturnType<typeof setInterval> | null = null
+    let heartbeatInterval = HEARTBEAT_FAST
+
+    const scheduleHeartbeat = () => {
+      if (heartbeatId !== null) {
+        clearInterval(heartbeatId)
+      }
+      heartbeatId = setInterval(() => {
+        if (settled) return
+        const elapsed = Date.now() - thinkStartTime
+        const mins = Math.floor(elapsed / 60000)
+        const secs = Math.floor((elapsed % 60000) / 1000)
+        const ts = `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+
+        // 30分钟后切到10分钟间隔
+        if (heartbeatInterval === HEARTBEAT_FAST && elapsed >= SLOW_AFTER_MS) {
+          heartbeatInterval = HEARTBEAT_SLOW
+          scheduleHeartbeat()
+          console.log(`[bridge] Heartbeat slowed to 10min interval (elapsed ${ts})`)
+          return  // let the new interval fire
+        }
+
+        if (onProgress) {
+          if (latestText.trim()) {
+            void onProgress(formatProgress(`${latestText}\n\n[运行中 +${ts}]`)).catch(() => {})
+          } else {
+            void onProgress(formatProgress(`[运行中 +${ts} — 等待模型响应...]`)).catch(() => {})
+          }
+        }
+      }, heartbeatInterval)
+    }
+    scheduleHeartbeat()
 
     const resetActivityTimeout = () => {
       timeoutCount = 0
@@ -266,15 +352,14 @@ async function waitForSessionReply(
         clearTimeout(currentTimeoutId)
         currentTimeoutId = setTimeout(() => {
           timeoutCount++
-          if (timeoutCount >= maxTimeoutCount) {
-            console.log("[bridge] TIMEOUT! latestText so far:", latestText.substring(0, 200))
-            // Don't abort — let model finish. Just resolve with what we have
-            finish(() => resolve(latestText.trim() || "(AI 思考时间过长，请稍后再试或切换更快的模型)"))
-            return
-          }
-          console.log(`[bridge] Timeout round ${timeoutCount}/${maxTimeoutCount}, sending progress note`)
-          if (onProgress && latestText.trim()) {
-              void onProgress(formatProgress(`${latestText}\n\n[处理中，已等待 ${TIMEOUT_MINUTES} 分钟，任务仍在继续...]`))
+          if (timeoutCount <= 15) {
+            if (timeoutCount > 3) {
+              console.log(`[bridge] Timeout round ${timeoutCount} (${timeoutCount * 2}min)`)
+            }
+          } else {
+            if (timeoutCount % 5 === 0) {
+              console.log(`[bridge] Timeout round ${timeoutCount} (${timeoutCount * 2}min) — still waiting for AI...`)
+            }
           }
           scheduleTimeout()
         }, RESPONSE_TIMEOUT_MS)
@@ -290,6 +375,10 @@ async function waitForSessionReply(
         clearTimeout(currentTimeoutId)
         currentTimeoutId = null
       }
+      if (heartbeatId !== null) {
+        clearInterval(heartbeatId)
+        heartbeatId = null
+      }
       router.unregister(sessionId)
       console.log("[bridge] Session finished with text:", latestText.substring(0, 200))
       done()
@@ -297,7 +386,6 @@ async function waitForSessionReply(
 
     router.unregister(sessionId)
     router.register(sessionId, (event: Event) => {
-      events.push(event)
       console.log("[bridge] Event received:", event.type)
 
       if (event.type === "message.updated") {
@@ -320,20 +408,46 @@ async function waitForSessionReply(
           console.log("[bridge] Part updated:", part.type, "msgID:", part.messageID, "text:", text.substring(0, 80))
           resetActivityTimeout()
 
-          // Accumulate reasoning/text separately for progress display
+          // 记录 part 类型/全量文本，供 message.part.delta 累积使用
+          const existing = partTexts.get(part.id)
+          if (existing) {
+            existing.type = part.type
+            // part.updated 在创建(空)和完成(全量)时触发；若已有 delta 累积，用全量覆盖
+            if (text.trim()) {
+              existing.text = text
+            }
+          } else {
+            partTexts.set(part.id, { type: part.type, text })
+          }
+
           if (text.trim()) {
             latestText = text
-            const now = Date.now()
-            const hasMeaningfulDelta = text.trim().length >= 30 && text !== lastProgressText
-            const canPushProgress = now - lastProgressAt >= 8000
-            if (onProgress && hasMeaningfulDelta && canPushProgress) {
-              lastProgressText = text
-              lastForwardedProgressText = text
-              lastProgressAt = now
-              void onProgress(formatProgress(`${text}\n\n[处理中...]`)).catch((error) => {
-                console.error("[bridge] failed to send progress reply:", error)
-              })
-            }
+            pushProgressIfNeeded(text)
+          }
+        }
+        return
+      }
+
+      // 流式增量文本（opencode 服务器 1.18+）：
+      // message.part.updated 只在 part 创建(空)和完成(全量)时触发，
+      // 中间的 token 全部通过 message.part.delta 按 partID 推送。
+      // 若未累积这里，reasoning/正文在流式期间永远拿不到 → 595 分钟只有心跳。
+      if ((event as any).type === "message.part.delta") {
+        const props = event.properties as any
+        if (props?.field === "text" && props?.partID) {
+          const entry = partTexts.get(props.partID)
+          if (entry && (entry.type === "text" || entry.type === "reasoning")) {
+            entry.text = (entry.text || "") + (props.delta || "")
+            latestText = entry.text
+            console.log("[bridge] Part delta:", entry.type, "len:", entry.text.length)
+            resetActivityTimeout()
+            pushProgressIfNeeded(entry.text)
+          } else if (!entry) {
+            // delta 先于 part.updated 到达（罕见）：先按 text 累积，等 part.updated 再纠正类型
+            partTexts.set(props.partID, { type: "text", text: props.delta || "" })
+            latestText = props.delta || ""
+            resetActivityTimeout()
+            pushProgressIfNeeded(latestText)
           }
         }
         return
@@ -363,6 +477,11 @@ async function waitForSessionReply(
 
       if (event.type === "session.idle") {
         console.log("[bridge] Session idle received!")
+        // 优先用 partTexts 中最完整的累积文本（text 优先于 reasoning，长度最大者）
+        const accumulated = getBestAccumulatedText()
+        if (accumulated.trim()) {
+          latestText = accumulated
+        }
         if (!latestText.trim()) {
           // Don't resolve yet — wait for message.part.updated to deliver text
           // The 2-second timer from startPrompt().then() will handle eventual timeout
@@ -405,6 +524,12 @@ async function waitForSessionReply(
           return
         }
 
+        // 优先用 partTexts 中最完整的累积文本
+        const accumulated = getBestAccumulatedText()
+        if (!latestText.trim() && accumulated.trim()) {
+          latestText = accumulated
+          console.log("[bridge] Using accumulated part text as latestText")
+        }
         if (!latestText.trim() && extracted.trim()) {
           latestText = extracted
           console.log("[bridge] Extracted text from prompt result (no events received)")
