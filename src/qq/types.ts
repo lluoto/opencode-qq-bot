@@ -103,6 +103,7 @@ export interface WSPayload<T = unknown> {
  */
 export interface MessageContext {
   type: "c2c" | "group"
+  botId: string
   userId: string
   groupId?: string
   msgId: string

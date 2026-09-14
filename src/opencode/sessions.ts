@@ -1,11 +1,17 @@
+// @input:  ./client (OpencodeClient)
+// @output: SessionManager, UserSession
+// @pos:    opencode层 - QQ用户<->OpenCode Session 映射管理
 import type { OpencodeClient } from "./client.js"
-import { createSession } from "./adapter.js"
-import type { ModelConfig } from "../config.js"
-import { isAgentAllowedForModel } from "./agent-policy.js"
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { homedir } from "node:os"
+import { dirname, join } from "node:path"
+
+const DEFAULT_AGENT_PREFERENCES_PATH = join(homedir(), ".openqq", "agent-preferences.json")
 
 interface UserSession {
   sessionId: string
   title?: string
+  // Set only after an explicit /model selection; otherwise OpenCode owns the model.
   modelId?: string
   providerId?: string
   agentId?: string
@@ -13,99 +19,112 @@ interface UserSession {
 
 export class SessionManager {
   private sessions = new Map<string, UserSession>()
-  private userSessionHistory = new Map<string, Array<{ id: string; title: string }>>()
   private client: OpencodeClient
-  private defaultModel?: ModelConfig
+  private namespace: string
+  private preferencesPath: string
 
-  constructor(client: OpencodeClient, defaultModel?: ModelConfig) {
+  constructor(client: OpencodeClient, namespace = "default", preferencesPath = DEFAULT_AGENT_PREFERENCES_PATH) {
     this.client = client
-    this.defaultModel = defaultModel
+    this.namespace = namespace
+    this.preferencesPath = preferencesPath
   }
 
-  async getOrCreate(userId: string): Promise<UserSession> {
-    const existing = this.sessions.get(userId)
+  async getOrCreate(stateKey: string): Promise<UserSession> {
+    const existing = this.sessions.get(stateKey)
     if (existing) return existing
 
-    const created = await createSession(this.client)
-    const session: UserSession = { sessionId: created.id, title: created.title }
-    this.sessions.set(userId, session)
-    this.trackSession(userId, created.id, created.title)
+    const result = await this.client.session.create({})
+    const session: UserSession = {
+      sessionId: result.data!.id,
+      title: result.data!.title,
+      agentId: this.readAgentPreference(stateKey),
+    }
+    this.sessions.set(stateKey, session)
     return session
   }
 
-  async createNew(userId: string): Promise<UserSession> {
-    const created = await createSession(this.client)
-    const session: UserSession = { sessionId: created.id, title: created.title }
-    this.sessions.set(userId, session)
-    this.trackSession(userId, created.id, created.title)
+  async createNew(stateKey: string): Promise<UserSession> {
+    const existing = this.sessions.get(stateKey)
+    const result = await this.client.session.create({})
+    const session: UserSession = {
+      sessionId: result.data!.id,
+      title: result.data!.title,
+      agentId: existing?.agentId ?? this.readAgentPreference(stateKey),
+    }
+    this.sessions.set(stateKey, session)
     return session
   }
 
-  getUserSessions(userId: string): Array<{ id: string; title: string }> {
-    return this.userSessionHistory.get(userId) ?? []
-  }
-
-  switchSession(userId: string, sessionId: string, title?: string): void {
-    const current = this.sessions.get(userId)
-    this.sessions.set(userId, {
-      providerId: current?.providerId,
-      modelId: current?.modelId,
+  switchSession(stateKey: string, sessionId: string, title?: string): void {
+    const existing = this.sessions.get(stateKey)
+    this.sessions.set(stateKey, {
       sessionId,
       title,
+      providerId: existing?.providerId,
+      modelId: existing?.modelId,
+      agentId: existing?.agentId ?? this.readAgentPreference(stateKey),
     })
   }
 
-  getSession(userId: string): UserSession | undefined {
-    return this.sessions.get(userId)
+  getSession(stateKey: string): UserSession | undefined {
+    return this.sessions.get(stateKey)
   }
 
-  setModel(userId: string, providerId: string, modelId: string): void {
-    const s = this.sessions.get(userId)
+  setModel(stateKey: string, providerId: string, modelId: string): void {
+    const s = this.sessions.get(stateKey)
     if (s) {
       s.providerId = providerId
       s.modelId = modelId
-      if (!isAgentAllowedForModel(s.agentId, providerId, modelId)) {
-        s.agentId = undefined
-      }
     }
   }
 
-  setAgent(userId: string, agentId: string): void {
-    const s = this.sessions.get(userId)
+  setAgent(stateKey: string, agentId: string): void {
+    const s = this.sessions.get(stateKey)
     if (s) {
       s.agentId = agentId
     }
+    this.writeAgentPreference(stateKey, agentId)
   }
 
-  getModel(userId: string): { providerId?: string; modelId?: string } {
-    const s = this.sessions.get(userId)
-    return {
-      providerId: s?.providerId ?? this.defaultModel?.providerId,
-      modelId: s?.modelId ?? this.defaultModel?.modelId,
+  getModel(stateKey: string): { providerId?: string; modelId?: string } {
+    const s = this.sessions.get(stateKey)
+    return { providerId: s?.providerId, modelId: s?.modelId }
+  }
+
+  getAgent(stateKey: string): string | undefined {
+    return this.sessions.get(stateKey)?.agentId ?? this.readAgentPreference(stateKey)
+  }
+
+  private preferenceKey(stateKey: string): string {
+    return `${this.namespace}:${stateKey}`
+  }
+
+  private readPreferences(): Record<string, string> {
+    try {
+      if (!existsSync(this.preferencesPath)) return {}
+      const parsed = JSON.parse(readFileSync(this.preferencesPath, "utf8"))
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {}
+      return Object.fromEntries(
+        Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+      )
+    } catch (error) {
+      console.error("[sessions] Failed to read agent preferences:", error)
+      return {}
     }
   }
 
-  getAgent(userId: string): string | undefined {
-    return this.sessions.get(userId)?.agentId
+  private readAgentPreference(stateKey: string): string | undefined {
+    return this.readPreferences()[this.preferenceKey(stateKey)]
   }
 
-  updateSessionTitle(userId: string, sessionId: string, title: string): void {
-    const history = this.userSessionHistory.get(userId)
-    if (history) {
-      const entry = history.find((h) => h.id === sessionId)
-      if (entry) entry.title = title
-    }
-    const current = this.sessions.get(userId)
-    if (current && current.sessionId === sessionId) {
-      current.title = title
-    }
-  }
-
-  private trackSession(userId: string, sessionId: string, title: string): void {
-    const history = this.userSessionHistory.get(userId) ?? []
-    if (!history.some((h) => h.id === sessionId)) {
-      history.push({ id: sessionId, title })
-      this.userSessionHistory.set(userId, history)
+  private writeAgentPreference(stateKey: string, agentId: string): void {
+    try {
+      const preferences = this.readPreferences()
+      preferences[this.preferenceKey(stateKey)] = agentId
+      mkdirSync(dirname(this.preferencesPath), { recursive: true })
+      writeFileSync(this.preferencesPath, `${JSON.stringify(preferences, null, 2)}\n`, "utf8")
+    } catch (error) {
+      console.error("[sessions] Failed to persist agent preference:", error)
     }
   }
 }

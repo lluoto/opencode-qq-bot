@@ -140,6 +140,8 @@ MAX_REPLY_LENGTH=3000
 | `/model <provider/model>` | 直接切换到指定模型 |
 | `/agent` | 列出可用 Agent |
 | `/agent <name>` | 切换 Agent（如 code / ask） |
+| `/mode plan\|build` | 切换并持久化计划/执行模式 |
+| `/plan` / `/build` | 快速切换到对应模式 |
 | `/rename <name>` | 重命名当前会话 |
 
 首次 @机器人 或私聊时，Bot 会自动发送命令帮助。
@@ -148,9 +150,13 @@ MAX_REPLY_LENGTH=3000
 
 当 `/sessions` 列出历史会话后，直接回复数字会优先执行会话切换，不会再被误判成权限确认指令。
 
+模式选择保存在 `~/.openqq/agent-preferences.json`，OpenQQ 重启、创建新会话或切换历史会话后仍会保留。未在 QQ 明确选择模式时，Bot 不覆盖 OpenCode 会话自身的 Agent。
+
 ---
 
 ## QQ 确认与权限交互
+
+当模型调用 Question 工具提问时，Bot 会把题目和选项转发到 QQ。单选回复 `1`，多选回复 `1,3`；多道题会逐题收集后一次性提交。事件流漏发时，Bot 还会轮询 OpenCode 的 `/question` 接口补偿。
 
 当 OpenCode 先要求人工确认时，QQ 会显示：
 

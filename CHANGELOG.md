@@ -4,6 +4,9 @@
 
 ### Added
 
+- 支持 `/mode plan|build`、`/plan`、`/build`，并按 Bot/QQ 用户持久化模式偏好
+- 支持将 OpenCode Question 工具的单选、多选和自定义问题转发到 QQ，含 `/question` 轮询兜底
+- 增加单实例 PID 锁、OpenCode 内嵌服务器生命周期管理和固定 5 分钟长任务心跳
 - 新增 `ARCHITECTURE_ZH.md`，面向熟悉 Python 但不熟悉 TS/JS 的新人说明项目结构、桥接逻辑和多 Bot 可行性
 - README 新增最近修复说明、外部 OpenCode 对接说明、变更记录入口
 - README 新增提示：启动外部 OpenCode 时应显式指定 host/port，并与 `openqq` 的 `OPENCODE_BASE_URL` 保持一致
@@ -17,6 +20,10 @@
 
 ### Fixed
 
+- 修复 QQ Gateway 在长时间断网后反复 Resume 过期会话、进程存活但平台显示未登录的问题
+- 修复 `/stop` 与已完成模型结果竞争时丢弃有效回复的问题
+- 修复长任务硬超时截断、空 prompt 结果、嵌套 provider 错误和模型默认值覆盖会话选择的问题
+- 修复 Windows 控制台 CP936 下中文日志显示乱码的问题
 - 修复 `\sessions` 被当作普通聊天转给 OpenCode 的问题
 - 修复 `permission.asked` 未被桥接到 QQ 的问题
 - 修复 QQ 中数字回复被误判为权限确认，导致会话切换失败的问题
