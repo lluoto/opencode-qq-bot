@@ -23,6 +23,7 @@ const RESPONSE_TIMEOUT_MS = 2 * 60 * 1000
 interface Bridge {
   handleMessage: (ctx: MessageContext) => Promise<void>
   hasActiveRequests: () => boolean
+  dispose: () => void
 }
 
 interface PromptOptions {
@@ -65,6 +66,8 @@ export function createBridge(
   const activeControllers = new Map<string, AbortController>()
   const pendingSelections = new Map<string, PendingSelection>()
   const pendingQuestions = new Map<string, PendingQuestion>()
+  const sessionContexts = new Map<string, MessageContext>()
+  const forwardedQuestionIds = new Set<string>()
   const processedMessages = new Map<string, number>()
   const botAppId = botConfig?.appId ?? config.qq.appId
   const botClientSecret = botConfig?.clientSecret ?? config.qq.clientSecret
@@ -81,6 +84,54 @@ export function createBridge(
       return controller !== undefined
     },
   }
+
+  const forwardQuestionToQQ = async (ctx: MessageContext, pending: PendingQuestion): Promise<void> => {
+    if (forwardedQuestionIds.has(pending.requestId)) return
+    forwardedQuestionIds.add(pending.requestId)
+    const stateKey = deriveStateKey(ctx.botId, ctx.userId, ctx.groupId)
+    pendingQuestions.set(stateKey, pending)
+    try {
+      await sendReply(ctx, formatQuestionPrompt(pending))
+    } catch (error) {
+      forwardedQuestionIds.delete(pending.requestId)
+      if (pendingQuestions.get(stateKey)?.requestId === pending.requestId) {
+        pendingQuestions.delete(stateKey)
+      }
+      throw error
+    }
+  }
+
+  const forwardQuestionRequest = async (request: Record<string, unknown>): Promise<void> => {
+    const requestId = getStringProperty(request, "id")
+    const sessionId = getStringProperty(request, "sessionID") ?? getStringProperty(request, "sessionId")
+    if (!requestId || !sessionId || forwardedQuestionIds.has(requestId)) return
+    const ctx = sessionContexts.get(sessionId)
+    if (!ctx || !Array.isArray(request.questions)) return
+    const questions = request.questions.map(toQuestionInfo).filter((question): question is QuestionInfo => question !== null)
+    if (questions.length === 0) return
+    await forwardQuestionToQQ(ctx, { requestId, sessionId, questions, questionIndex: 0, answers: [] })
+  }
+
+  const pollQuestions = async (): Promise<void> => {
+    try {
+      const response = await fetch(`${config.opencode.baseUrl.replace(/\/$/, "")}/question`)
+      if (!response.ok) return
+      const requests = await response.json()
+      if (!Array.isArray(requests)) return
+      for (const request of requests) await forwardQuestionRequest(asRecord(request))
+    } catch (error) {
+      console.error("[bridge] failed to poll pending questions:", error)
+    }
+  }
+
+  const unsubscribeQuestionEvents = router.onEvent((event) => {
+    if (String(event.type) !== "question.asked") return
+    void forwardQuestionRequest(asRecord(event.properties)).catch((error) => {
+      console.error("[bridge] failed to forward model question:", error)
+    })
+  })
+  const questionPollTimer = setInterval(() => { void pollQuestions() }, 3_000)
+  questionPollTimer.unref?.()
 
   const handleMessage = async (ctx: MessageContext): Promise<void> => {
     try {
@@ -114,6 +165,8 @@ export function createBridge(
           }
         }
         const reply = await handleCommand(ctx, commandContext)
+        const session = sessions.getSession(ctx.userId)
+        if (session) sessionContexts.set(session.sessionId, ctx)
         await sendReply(ctx, reply)
         return
       }
@@ -150,6 +203,7 @@ export function createBridge(
         let sentProcessingReply = false
 
         let session = await sessions.getOrCreate(ctx.userId)
+        sessionContexts.set(session.sessionId, ctx)
         const promptOptions = buildPromptOptions(ctx.userId, sessions)
         promptModel = promptOptions.model
         console.log("[bridge] Model override for prompt:", JSON.stringify(promptOptions.model))
@@ -160,8 +214,7 @@ export function createBridge(
           }, async (progressText) => {
             await sendReply(ctx, progressText)
           }, async (pendingQuestion) => {
-            pendingQuestions.set(stateKey, pendingQuestion)
-            await sendReply(ctx, formatQuestionPrompt(pendingQuestion))
+            await forwardQuestionToQQ(ctx, pendingQuestion)
           })
         }
 
@@ -172,6 +225,7 @@ export function createBridge(
           if (isSessionNotFoundError(error)) {
             console.log("[bridge] Session missing, creating a fresh one:", session.sessionId)
             session = await sessions.createNew(ctx.userId)
+            sessionContexts.set(session.sessionId, ctx)
             replyText = await runOnce(session.sessionId)
           } else {
             throw error
@@ -191,7 +245,13 @@ export function createBridge(
         if (processingTimer) {
           clearTimeout(processingTimer)
         }
-        await sendReply(ctx, `处理失败：${toUserFacingError(error, promptModel)}`)
+        if (abortController.signal.aborted) {
+          // /stop can race with an SSE session.error or a prompt response carrying
+          // an abort error. Both are expected cancellation paths, not user failures.
+          console.log("[bridge] Suppressing prompt error after user stop:", error)
+        } else {
+          await sendReply(ctx, `处理失败：${toUserFacingError(error, promptModel)}`)
+        }
       } finally {
         pendingQuestions.delete(stateKey)
         busyUsers.delete(stateKey)
@@ -215,6 +275,10 @@ export function createBridge(
   return {
     handleMessage,
     hasActiveRequests: () => busyUsers.size > 0,
+    dispose: () => {
+      clearInterval(questionPollTimer)
+      unsubscribeQuestionEvents()
+    },
   }
 }
 
@@ -710,7 +774,11 @@ async function waitForSessionReply(
       if (eventType === "session.error") {
         const errorValue = properties.error
         console.log("[bridge] Session error:", errorValue)
-        finish(() => reject(new Error(toErrorMessage(errorValue) || "未知错误")))
+        if (abortSignal.aborted) {
+          finish(() => resolve(""))
+        } else {
+          finish(() => reject(new Error(toErrorMessage(errorValue) || "未知错误")))
+        }
       }
     })
 
@@ -727,7 +795,11 @@ async function waitForSessionReply(
         console.log("[bridge] Prompt completed for session:", sessionId)
         const promptError = getPromptError(result)
         if (promptError) {
-          finish(() => reject(new Error(toErrorMessage(promptError))))
+          if (abortSignal.aborted) {
+            finish(() => resolve(""))
+          } else {
+            finish(() => reject(new Error(toErrorMessage(promptError))))
+          }
           return
         }
 

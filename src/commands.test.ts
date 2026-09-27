@@ -86,6 +86,41 @@ describe("listModels", () => {
   })
 })
 
+describe("session compaction", () => {
+  test("summarizes the active session", async () => {
+    const client = createClient()
+    const calls: Array<{ path: { id: string } }> = []
+    Object.defineProperty(client.session, "summarize", {
+      value: async (request: { path: { id: string } }) => {
+        calls.push(request)
+        return { data: true }
+      },
+    })
+    const context = createModelCommandContext(client)
+
+    const result = await handleCommand({ ...modelContext, content: "/compact" }, context)
+
+    expect(calls).toEqual([{ path: { id: "session-1" } }])
+    expect(result).toBe("已请求压缩当前会话：Test session")
+  })
+
+  test("rejects compaction when no session is active", async () => {
+    const client = createClient()
+    const context: CommandContext = {
+      config: testConfig,
+      client,
+      sessions: new SessionManager(client),
+      getAccessToken: async () => "token",
+      pendingSelections: new Map<string, PendingSelection>(),
+      configuredModelIds,
+    }
+
+    const result = await handleCommand({ ...modelContext, content: "/c" }, context)
+
+    expect(result).toBe("当前还没有会话可压缩")
+  })
+})
+
 describe("model switching", () => {
   test("switches explicitly to an authorized model and fetches the visible list for authorization check", async () => {
     // Given

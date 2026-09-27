@@ -345,6 +345,33 @@ describe("bridge command credentials", () => {
     expect(bridge.hasActiveRequests()).toBe(false)
   })
 
+  test("does not report a server aborted event as a processing failure after stop", async () => {
+    const client = createClient()
+    const promptRejectors = holdSessionPrompts(client)
+    Object.defineProperty(client.session, "abort", { value: async () => ({ data: true }) })
+    const sessions = new SessionManager(client)
+    sessions.switchSession(baseMessage.userId, "session-1", "Test session")
+    const router = new EventRouter(client)
+    const bridge = createBridge(config, client, router, sessions, bridgeBot)
+    const promptMessage = { ...baseMessage, msgId: "stop-event-prompt", content: "run" } satisfies MessageContext
+    const stopMessage = { ...baseMessage, msgId: "stop-event-command", content: "/stop" } satisfies MessageContext
+
+    const promptRequest = bridge.handleMessage(promptMessage)
+    await waitForPromptCount(promptRejectors, 1)
+    await bridge.handleMessage(stopMessage)
+    const listeners = (router as unknown as { listeners: Map<string, (event: unknown) => void> }).listeners
+    listeners.get("session-1")?.({
+      type: "session.error",
+      properties: { sessionID: "session-1", error: { message: "aborted" } },
+    })
+    await promptRequest
+    for (const reject of promptRejectors) reject(new Error("cleanup"))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(replies).toEqual(["已停止当前任务：Test session"])
+    expect(bridge.hasActiveRequests()).toBe(false)
+  })
+
   test("uses the Bridge bot credentials for command token lookup", async () => {
     // Given
     const client = createClient()
@@ -363,6 +390,35 @@ describe("bridge command credentials", () => {
 })
 
 describe("bridge question forwarding", () => {
+  test("forwards an SSE question for a QQ-bound session without an active prompt", async () => {
+    const client = createClient()
+    const sessions = new SessionManager(client)
+    sessions.switchSession(baseMessage.userId, "session-1", "Test session")
+    const router = new EventRouter(client)
+    const bridge = createBridge(config, client, router, sessions, bridgeBot)
+
+    await bridge.handleMessage({ ...baseMessage, msgId: "bind-session", content: "/status" })
+    const listeners = (router as unknown as { globalListeners: Set<(event: unknown) => void> }).globalListeners
+    for (const listener of listeners) {
+      listener({
+        type: "question.asked",
+        properties: {
+          id: "external-question",
+          sessionID: "session-1",
+          questions: [{
+            question: "选择执行方式",
+            multiple: false,
+            custom: true,
+            options: [{ label: "继续" }, { label: "停止" }],
+          }],
+        },
+      })
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(replies).toContain("【模型需要选择】 (1/1)\n选择执行方式\n1. 继续\n2. 停止\n回复一个序号；也可直接回复自定义答案。发送 /stop 可中止。")
+  })
+
   test("forwards a multiple-choice question to QQ and submits the selected labels", async () => {
     const client = createClient()
     let resolvePrompt: (value: unknown) => void = () => {}

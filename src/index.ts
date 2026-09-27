@@ -158,6 +158,7 @@ async function startServerInternal(): Promise<boolean> {
     else if (serverClose) { serverClose() }
     serverClose = null
     client = null
+    bridges.forEach((bridge) => bridge.dispose())
     bridges = []
     consecutiveFailures++
     return false
@@ -175,6 +176,7 @@ async function restartServer(): Promise<void> {
       if (gateway) { gateway.stop(); gateway = null }
       if (router) { router.stop(); router = null }
       if (serverClose) { serverClose(); serverClose = null }
+      bridges.forEach((bridge) => bridge.dispose())
       bridges = []
       client = null
     } catch (e) {
@@ -221,6 +223,8 @@ async function main(): Promise<void> {
     console.log(`[index] 收到 ${signal}，开始退出...`)
     if (gateway) gateway.stop()
     if (router) router.stop()
+    bridges.forEach((bridge) => bridge.dispose())
+    bridges = []
     stopBackgroundTokenRefresh()
     if (serverClose) serverClose()
     setTimeout(() => process.exit(0), 0)

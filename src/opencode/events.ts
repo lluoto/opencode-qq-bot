@@ -8,6 +8,7 @@ export type EventCallback = (event: Event) => void
 
 export class EventRouter {
   private listeners = new Map<string, EventCallback>()
+  private globalListeners = new Set<EventCallback>()
   private running = false
   private abortController: AbortController | null = null
   private client: OpencodeClient
@@ -47,6 +48,11 @@ export class EventRouter {
     this.listeners.delete(sessionId)
   }
 
+  onEvent(callback: EventCallback): () => void {
+    this.globalListeners.add(callback)
+    return () => this.globalListeners.delete(callback)
+  }
+
   isHealthy(): boolean {
     return !this.isReconnecting && this.consecutiveErrors < 3
   }
@@ -72,6 +78,8 @@ export class EventRouter {
           if (eventType !== "server.heartbeat") {
             console.log("[events] 事件:", eventType, "sessionID:", (event.properties as any).sessionID)
           }
+
+          for (const callback of this.globalListeners) callback(event)
 
           const sessionId = this.extractSessionId(event)
 

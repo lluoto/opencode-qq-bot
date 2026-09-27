@@ -35,9 +35,22 @@ function isProcessRunning(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false
   try {
     process.kill(pid, 0)
-    return true
   } catch {
     return false
+  }
+
+  if (process.platform !== "win32") return true
+  try {
+    const script = `(Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}').CommandLine`
+    const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+      encoding: "utf8",
+      windowsHide: true,
+    })
+    const commandLine = String(result.stdout ?? "").toLowerCase()
+    return commandLine.includes("opencode-qq-bot") || commandLine.includes("openqq")
+  } catch {
+    // Do not remove a lock when Windows process metadata cannot be inspected.
+    return true
   }
 }
 

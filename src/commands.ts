@@ -1,6 +1,6 @@
 // @input:  ./config, ./qq/types, ./opencode/* (client, sessions)
 // @output: isCommand, handleCommand, handlePendingSelection, CommandContext, PendingSelection
-// @pos:    根层 - 命令系统: /new /stop /status /sessions /help /model /agent /mode /rename
+// @pos:    根层 - 命令系统: /new /stop /compact /status /sessions /help /model /agent /mode /rename
 import type { Config } from "./config.js"
 import { listVisibleModels } from "./model-visibility.js"
 import type { VisibleModel } from "./model-visibility.js"
@@ -69,6 +69,9 @@ export async function handleCommand(ctx: MessageContext, cmdCtx: CommandContext)
     case "stop":
     case "x":
       return handleStop(ctx, cmdCtx)
+    case "compact":
+    case "c":
+      return handleCompact(ctx, cmdCtx)
     case "status":
     case "s":
       return handleStatus(ctx, cmdCtx)
@@ -172,6 +175,16 @@ async function handleStop(ctx: MessageContext, cmdCtx: CommandContext): Promise<
   cmdCtx.stopActiveRequest?.(deriveStateKey(ctx.botId, ctx.userId, ctx.groupId))
   await cmdCtx.client.session.abort({ path: { id: session.sessionId } })
   return `已停止当前任务：${session.title ?? session.sessionId}`
+}
+
+async function handleCompact(ctx: MessageContext, cmdCtx: CommandContext): Promise<string> {
+  const session = cmdCtx.sessions.getSession(ctx.userId)
+  if (!session) {
+    return "当前还没有会话可压缩"
+  }
+
+  await cmdCtx.client.session.summarize({ path: { id: session.sessionId } })
+  return `已请求压缩当前会话：${session.title ?? session.sessionId}`
 }
 
 async function handleStatus(ctx: MessageContext, cmdCtx: CommandContext): Promise<string> {
@@ -405,6 +418,7 @@ export function buildHelpText(): string {
     "命令（括号内为短别名）：",
     "/new (n) - 创建新会话",
     "/stop (x) - 停止当前 AI 运行",
+    "/compact (c) - 压缩当前会话上下文",
     "/status (s) - 查看服务器和会话状态",
     "/sessions (ss) - 列出历史会话",
     "/help (h) - 查看帮助",

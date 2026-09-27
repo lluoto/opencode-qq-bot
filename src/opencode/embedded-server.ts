@@ -196,10 +196,16 @@ export async function createOpencodeServer(options: { port: number }): Promise<S
     console.log(`[embedded-server] No config file found: ${(e as Error).message}`)
   }
 
-  const proc = spawn(resolveOpencodeBin(), ["server", "--port", String(port)], {
+  const bin = resolveOpencodeBin()
+  // Node cannot directly execute npm's Windows .cmd/.bat shims.
+  const needsShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(bin)
+  console.log(`[embedded-server] opencode bin: ${bin}${needsShell ? " (via shell)" : ""}`)
+
+  const proc = spawn(bin, ["server", "--port", String(port)], {
     cwd: serverCwd,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
+    shell: needsShell,
     env: {
       ...process.env,
       OPENCODE_SERVER_PASSWORD: "",
