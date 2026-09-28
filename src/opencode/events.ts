@@ -6,6 +6,12 @@ import type { Event } from "@opencode-ai/sdk"
 
 export type EventCallback = (event: Event) => void
 
+const LOGGED_EVENT_TYPES = new Set([
+  "session.idle", "session.error", "session.status", "session.compacted",
+  "question.asked", "question.replied", "question.rejected",
+  "permission.asked", "permission.replied",
+])
+
 export class EventRouter {
   private listeners = new Map<string, EventCallback>()
   private globalListeners = new Set<EventCallback>()
@@ -15,6 +21,7 @@ export class EventRouter {
 
   private consecutiveErrors = 0
   private lastSuccessfulConnection = 0
+  private lastEventAt = 0
   private isReconnecting = false
   private onReconnect: (() => void) | null = null
 
@@ -57,6 +64,17 @@ export class EventRouter {
     return !this.isReconnecting && this.consecutiveErrors < 3
   }
 
+  isStale(maxIdleMs: number): boolean {
+    return this.running && this.lastEventAt > 0 && Date.now() - this.lastEventAt > maxIdleMs
+  }
+
+  forceReconnect(reason: string): void {
+    if (!this.running || this.isReconnecting) return
+    console.warn(`[events] Forcing SSE reconnect: ${reason}`)
+    this.isReconnecting = true
+    this.abortController?.abort()
+  }
+
   private async consume(): Promise<void> {
     while (this.running) {
       try {
@@ -68,14 +86,16 @@ export class EventRouter {
         this.consecutiveErrors = 0
         this.isReconnecting = false
         this.lastSuccessfulConnection = Date.now()
+        this.lastEventAt = Date.now()
         console.log("[events] 已连接事件流")
 
         for await (const event of result.stream) {
           if (!this.running) break
 
-          // Only log important events, not heartbeat
+          this.lastEventAt = Date.now()
+          // Plugin/catalog churn is noisy; preserve only events relevant to a user request.
           const eventType = String(event.type)
-          if (eventType !== "server.heartbeat") {
+          if (LOGGED_EVENT_TYPES.has(eventType)) {
             console.log("[events] 事件:", eventType, "sessionID:", (event.properties as any).sessionID)
           }
 

@@ -8,7 +8,7 @@ OpenCode QQ Bot 源码根目录。QQ 消息 -> OpenCode AI -> QQ 回复。
 |------|------|
 | config.ts | 环境变量加载 + 校验 |
 | bridge.ts | 核心桥接: QQ 消息 -> OpenCode -> QQ 回复 |
-| commands.ts | 命令系统: /new /stop /status /sessions /help /model /agent /rename |
+| commands.ts | 命令系统: /new /stop /compact /status /sessions /help /model /agent /rename |
 | index.ts | 入口: 启动编排 + 优雅关闭 |
 
 ## 子目录

@@ -4,7 +4,7 @@
 import type { Config } from "./config.js"
 import type { MessageContext } from "./qq/types.js"
 import { getAccessToken } from "./qq/api.js"
-import { replyToQQ } from "./qq/sender.js"
+import { ReplyDeliveryError, replyToQQ } from "./qq/sender.js"
 import type { OpencodeClient } from "./opencode/client.js"
 import { EventRouter } from "./opencode/events.js"
 import { SessionManager } from "./opencode/sessions.js"
@@ -19,6 +19,14 @@ import {
 import { deriveStateKey } from "./state-key.js"
 
 const RESPONSE_TIMEOUT_MS = 2 * 60 * 1000
+const MAX_REQUEST_DURATION_MS = 30 * 60 * 1000
+
+class RequestTimeoutError extends Error {
+  constructor() {
+    super("AI 请求超过 30 分钟，已自动中止")
+    this.name = "RequestTimeoutError"
+  }
+}
 
 interface Bridge {
   handleMessage: (ctx: MessageContext) => Promise<void>
@@ -249,6 +257,8 @@ export function createBridge(
           // /stop can race with an SSE session.error or a prompt response carrying
           // an abort error. Both are expected cancellation paths, not user failures.
           console.log("[bridge] Suppressing prompt error after user stop:", error)
+        } else if (error instanceof RequestTimeoutError) {
+          await sendReply(ctx, error.message)
         } else {
           await sendReply(ctx, `处理失败：${toUserFacingError(error, promptModel)}`)
         }
@@ -259,6 +269,10 @@ export function createBridge(
       }
     } catch (error) {
       console.error("[bridge] handleMessage failed:", error)
+      if (error instanceof ReplyDeliveryError && error.deliveredChunks > 0) {
+        console.error(`[bridge] Suppressing error reply because ${error.deliveredChunks} reply chunk(s) were delivered`)
+        return
+      }
       try {
         await sendReply(ctx, `处理消息失败：${toUserFacingError(error)}`)
       } catch (replyError) {
@@ -488,11 +502,10 @@ async function waitForSessionReply(
 
   return new Promise<string>((resolve, reject) => {
     let timeoutCount = 0
-    // 总时长不设上限；诊断超时只记录日志，不会终止会话。
-    // 正常完成由 session.idle / session.error / prompt().then() 驱动。
-    // 心跳每5分钟推 [运行中 +MM:SS] 告知用户"还在运行"
+    // Inactivity diagnostics reset on events, but the hard request deadline does not.
 
     let currentTimeoutId: ReturnType<typeof setTimeout> | null = null
+    let hardTimeoutId: ReturnType<typeof setTimeout> | null = null
     let graceTimerId: ReturnType<typeof setTimeout> | null = null
     let questionPollId: ReturnType<typeof setInterval> | null = null
     // /stop 与 startPrompt() 的真实完成经常在毫秒级别内竞争到达（服务器已经算完并计费，
@@ -536,9 +549,13 @@ async function waitForSessionReply(
 
       if (onProgress) {
         if (latestText.trim()) {
-          void onProgress(formatProgress(`${latestText}\n\n[运行中 +${ts}]`)).catch(() => {})
+          void onProgress(formatProgress(`${latestText}\n\n[运行中 +${ts}]`)).catch((error) => {
+            console.warn("[bridge] failed to send heartbeat progress:", error)
+          })
         } else {
-          void onProgress(formatProgress(`[运行中 +${ts} — 等待模型响应...]`)).catch(() => {})
+          void onProgress(formatProgress(`[运行中 +${ts} — 等待模型响应...]`)).catch((error) => {
+            console.warn("[bridge] failed to send heartbeat progress:", error)
+          })
         }
       }
     }, HEARTBEAT_INTERVAL_MS)
@@ -551,6 +568,10 @@ async function waitForSessionReply(
       if (currentTimeoutId !== null) {
         clearTimeout(currentTimeoutId)
         currentTimeoutId = null
+      }
+      if (hardTimeoutId !== null) {
+        clearTimeout(hardTimeoutId)
+        hardTimeoutId = null
       }
       if (heartbeatId !== null) {
         clearInterval(heartbeatId)
@@ -783,6 +804,14 @@ async function waitForSessionReply(
     })
 
     scheduleTimeout()
+    hardTimeoutId = setTimeout(() => {
+      if (settled) return
+      console.error(`[bridge] Request exceeded ${MAX_REQUEST_DURATION_MS / 60000} minutes; aborting session ${sessionId}`)
+      void client.session.abort({ path: { id: sessionId } }).catch((error) => {
+        console.error("[bridge] failed to abort timed out session:", error)
+      })
+      finish(() => reject(new RequestTimeoutError()))
+    }, MAX_REQUEST_DURATION_MS)
 
     // OpenCode versions differ in whether the global stream includes session events.
     // Either the event stream or prompt result can complete the request.

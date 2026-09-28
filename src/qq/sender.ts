@@ -6,6 +6,13 @@ import type { MessageContext } from "./types.js"
 
 const DEFAULT_MAX_LENGTH = 3000
 
+export class ReplyDeliveryError extends Error {
+  constructor(readonly deliveredChunks: number, cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause))
+    this.name = "ReplyDeliveryError"
+  }
+}
+
 // Markdown -> QQ 纯文本: 保留代码块，去除其他标记
 export function formatForQQ(text: string): string {
   const codeBlocks: string[] = []
@@ -76,12 +83,18 @@ export async function replyToQQ(
   const formatted = formatForQQ(text)
   const chunks = splitMessage(formatted, maxLength)
 
+  let deliveredChunks = 0
   for (const chunk of chunks) {
     const msgSeq = getNextMsgSeq(ctx.msgId)
-    if (ctx.type === "group" && ctx.groupId) {
-      await sendGroupMessage(accessToken, ctx.groupId, chunk, ctx.msgId, msgSeq)
-    } else {
-      await sendC2CMessage(accessToken, ctx.userId, chunk, ctx.msgId, msgSeq, sandbox)
+    try {
+      if (ctx.type === "group" && ctx.groupId) {
+        await sendGroupMessage(accessToken, ctx.groupId, chunk, ctx.msgId, msgSeq)
+      } else {
+        await sendC2CMessage(accessToken, ctx.userId, chunk, ctx.msgId, msgSeq, sandbox)
+      }
+      deliveredChunks += 1
+    } catch (error) {
+      throw new ReplyDeliveryError(deliveredChunks, error)
     }
   }
 }

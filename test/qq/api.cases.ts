@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:
 import {
   clearTokenCache,
   getAccessToken,
+  apiRequest,
   startBackgroundTokenRefresh,
   stopBackgroundTokenRefresh,
 } from "../../src/qq/api.js"
@@ -153,6 +154,42 @@ describe("getAccessToken per App ID", () => {
       secondB: "bot-b-token-2",
       requestedAppIds: [BOT_A.appId, BOT_B.appId, BOT_A.appId, BOT_B.appId],
     })
+  })
+})
+
+describe("apiRequest network retries", () => {
+  test("retries an idempotent QQ message after a certificate transport error", async () => {
+    const calls: RequestInit[] = []
+    spyOn(globalThis, "fetch").mockImplementation((_input, init) => {
+      calls.push(init ?? {})
+      if (calls.length === 1) {
+        const error = new TypeError("unknown certificate verification error") as TypeError & { code?: string }
+        error.code = "CERTIFICATE_VERIFY_FAILED"
+        return Promise.reject(error)
+      }
+      return Promise.resolve(new Response(JSON.stringify({ id: "message-1" }), { status: 200 }))
+    })
+
+    const result = await apiRequest<{ id: string }>("token", "POST", "/v2/users/user/messages", {
+      content: "hello",
+      msg_id: "source-message",
+      msg_seq: 1,
+    })
+
+    expect(result).toEqual({ id: "message-1" })
+    expect(calls).toHaveLength(2)
+    expect(new Headers(calls[1]!.headers).get("connection")).toBe("close")
+  })
+
+  test("does not retry a non-idempotent POST", async () => {
+    let calls = 0
+    spyOn(globalThis, "fetch").mockImplementation(() => {
+      calls += 1
+      return Promise.reject(new TypeError("unknown certificate verification error"))
+    })
+
+    await expect(apiRequest("token", "POST", "/unsafe", { value: "once" })).rejects.toThrow("Network error")
+    expect(calls).toBe(1)
   })
 })
 

@@ -146,6 +146,8 @@ export function getNextMsgSeq(_msgId: string): number {
 
 const DEFAULT_API_TIMEOUT = 30000
 const FILE_UPLOAD_TIMEOUT = 120000
+const NETWORK_RETRY_DELAYS_MS = [250, 1_000]
+let nextRequestId = 0
 
 function redactHeaders(headers: Readonly<Record<string, string>>): Record<string, string> {
   return Object.fromEntries(
@@ -174,70 +176,96 @@ export async function apiRequest<T = unknown>(
   const isFileUpload = path.includes("/files")
   const timeout = timeoutMs ?? (isFileUpload ? FILE_UPLOAD_TIMEOUT : DEFAULT_API_TIMEOUT)
 
-  const controller = new AbortController()
-  const timeoutId = setTimeout(() => {
-    controller.abort()
-  }, timeout)
+  const requestId = `${Date.now().toString(36)}-${(++nextRequestId).toString(36)}`
+  const bodyText = body === undefined ? undefined : JSON.stringify(body)
+  const isIdempotentMessage = method === "POST" && path.includes("/messages") && typeof (body as { msg_id?: unknown } | undefined)?.msg_id === "string"
+  const mayRetry = method === "GET" || method === "HEAD" || isIdempotentMessage
 
-  const options: RequestInit = {
-    method,
-    headers,
-    signal: controller.signal,
-  }
-
-  if (body) {
-    options.body = JSON.stringify(body)
-  }
-
-  console.log(`[qqbot-api] >>> ${method} ${url} (timeout: ${timeout}ms)`)
-  console.log("[qqbot-api] >>> Headers:", JSON.stringify(redactHeaders(headers), null, 2))
+  console.log(`[qqbot-api:${requestId}] >>> ${method} ${url} (timeout: ${timeout}ms, retries=${mayRetry ? NETWORK_RETRY_DELAYS_MS.length : 0})`)
+  console.log(`[qqbot-api:${requestId}] >>> Headers:`, JSON.stringify(redactHeaders(headers), null, 2))
   if (body) {
     const logBody = { ...(body as Record<string, unknown>) }
     if (typeof logBody.file_data === "string") {
       logBody.file_data = `<base64 ${logBody.file_data.length} chars>`
     }
-    console.log("[qqbot-api] >>> Body:", JSON.stringify(logBody, null, 2))
+    console.log(`[qqbot-api:${requestId}] >>> Body:`, JSON.stringify(logBody, null, 2))
   }
 
-  let res: Response
-  try {
-    res = await fetch(url, options)
-  } catch (err) {
-    clearTimeout(timeoutId)
-    if (err instanceof Error && err.name === "AbortError") {
-      console.error(`[qqbot-api] <<< Request timeout after ${timeout}ms`)
-      throw new Error(`Request timeout [${path}]: exceeded ${timeout}ms`)
+  for (let attempt = 0; attempt <= NETWORK_RETRY_DELAYS_MS.length; attempt += 1) {
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), timeout)
+    const attemptHeaders = attempt === 0 ? headers : { ...headers, Connection: "close" }
+    let res: Response
+    try {
+      res = await fetch(url, { method, headers: attemptHeaders, signal: controller.signal, body: bodyText })
+    } catch (err) {
+      clearTimeout(timeoutId)
+      const detail = describeNetworkError(err)
+      const timedOut = err instanceof Error && err.name === "AbortError"
+      console.error(`[qqbot-api:${requestId}] <<< ${timedOut ? "Request timeout" : "Network error"} attempt=${attempt + 1}: ${detail}`)
+      if (mayRetry && attempt < NETWORK_RETRY_DELAYS_MS.length) {
+        await retryDelay(requestId, attempt, detail)
+        continue
+      }
+      throw new Error(timedOut
+        ? `Request timeout [${path}] request=${requestId}: exceeded ${timeout}ms`
+        : `Network error [${path}] request=${requestId}: ${detail}`)
+    } finally {
+      clearTimeout(timeoutId)
     }
-    console.error("[qqbot-api] <<< Network error:", err)
-    throw new Error(`Network error [${path}]: ${err instanceof Error ? err.message : String(err)}`)
-  } finally {
-    clearTimeout(timeoutId)
+
+    const responseHeaders: Record<string, string> = {}
+    res.headers.forEach((value, key) => { responseHeaders[key] = value })
+    console.log(`[qqbot-api:${requestId}] <<< Status attempt=${attempt + 1}: ${res.status} ${res.statusText}`)
+    console.log(`[qqbot-api:${requestId}] <<< Headers:`, JSON.stringify(responseHeaders, null, 2))
+
+    let data: T
+    try {
+      const rawBody = await res.text()
+      console.log(`[qqbot-api:${requestId}] <<< Body:`, rawBody)
+      data = JSON.parse(rawBody) as T
+    } catch (err) {
+      const detail = describeNetworkError(err)
+      console.error(`[qqbot-api:${requestId}] <<< Response body error attempt=${attempt + 1}: ${detail}`)
+      if (res.ok && mayRetry && attempt < NETWORK_RETRY_DELAYS_MS.length && isTransientNetworkError(detail)) {
+        await retryDelay(requestId, attempt, detail)
+        continue
+      }
+      throw new Error(`Failed to parse response [${path}] request=${requestId}: ${detail}`)
+    }
+
+    if (!res.ok) {
+      const error = data as { message?: string; code?: number }
+      const detail = error.message ?? JSON.stringify(data)
+      if (mayRetry && res.status >= 500 && attempt < NETWORK_RETRY_DELAYS_MS.length) {
+        await retryDelay(requestId, attempt, `HTTP ${res.status}: ${detail}`)
+        continue
+      }
+      throw new Error(`API Error [${path}] request=${requestId}: ${detail}`)
+    }
+
+    return data
   }
 
-  const responseHeaders: Record<string, string> = {}
-  res.headers.forEach((value, key) => {
-    responseHeaders[key] = value
-  })
-  console.log(`[qqbot-api] <<< Status: ${res.status} ${res.statusText}`)
-  console.log("[qqbot-api] <<< Headers:", JSON.stringify(responseHeaders, null, 2))
+  throw new Error(`Request retries exhausted [${path}] request=${requestId}`)
+}
 
-  let data: T
-  let rawBody: string
-  try {
-    rawBody = await res.text()
-    console.log("[qqbot-api] <<< Body:", rawBody)
-    data = JSON.parse(rawBody) as T
-  } catch (err) {
-    console.error("[qqbot-api] <<< Parse error:", err)
-    throw new Error(`Failed to parse response [${path}]: ${err instanceof Error ? err.message : String(err)}`)
-  }
+function describeNetworkError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error)
+  const detail = error as Error & { code?: unknown; cause?: unknown }
+  const code = typeof detail.code === "string" ? ` code=${detail.code}` : ""
+  const cause = detail.cause instanceof Error ? ` cause=${detail.cause.message}` : detail.cause ? ` cause=${String(detail.cause)}` : ""
+  return `${detail.message}${code}${cause}`
+}
 
-  if (!res.ok) {
-    const error = data as { message?: string; code?: number }
-    throw new Error(`API Error [${path}]: ${error.message ?? JSON.stringify(data)}`)
-  }
+function isTransientNetworkError(detail: string): boolean {
+  return /certificate|tls|socket|connect|network|reset|closed|econn|etimedout/i.test(detail)
+}
 
-  return data
+async function retryDelay(requestId: string, attempt: number, reason: string): Promise<void> {
+  const delay = NETWORK_RETRY_DELAYS_MS[attempt]!
+  console.warn(`[qqbot-api:${requestId}] retrying in ${delay}ms after ${reason}`)
+  await new Promise((resolve) => setTimeout(resolve, delay))
 }
 
 /**

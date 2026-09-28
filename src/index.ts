@@ -235,14 +235,14 @@ async function main(): Promise<void> {
 
   setInterval(async () => {
     if (isShuttingDown || !client) return
-    if (bridges.some((currentBridge) => currentBridge.hasActiveRequests())) {
-      console.log("[index] 跳过健康检查：当前有请求处理中")
-      return
-    }
+    const hasActiveRequests = bridges.some((currentBridge) => currentBridge.hasActiveRequests())
 
     try {
-      await client.session.list()
+      await healthCheck(client, 5_000)
       consecutiveFailures = 0
+      if (hasActiveRequests && router?.isStale(2 * 60 * 1000)) {
+        router.forceReconnect("no SSE event while a request is active for 2 minutes")
+      }
     } catch (error) {
       console.error("[index] 健康检查失败:", error instanceof Error ? error.message : String(error))
       consecutiveFailures++
