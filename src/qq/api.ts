@@ -57,54 +57,73 @@ export async function getAccessToken(appId: string, clientSecret: string): Promi
 async function doFetchToken(appId: string, clientSecret: string): Promise<string> {
   const requestBody = { appId, clientSecret }
   const requestHeaders = { "Content-Type": "application/json" }
+  const requestId = `token-${Date.now().toString(36)}-${(++nextRequestId).toString(36)}`
 
-  console.log(`[qqbot-api] >>> POST ${TOKEN_URL}`)
-  console.log("[qqbot-api] >>> Headers:", JSON.stringify(requestHeaders, null, 2))
-  console.log("[qqbot-api] >>> Body:", JSON.stringify({ appId, clientSecret: "***" }, null, 2))
+  console.log(`[qqbot-api:${requestId}] >>> POST ${TOKEN_URL} (retries=${NETWORK_RETRY_DELAYS_MS.length})`)
+  console.log(`[qqbot-api:${requestId}] >>> Headers:`, JSON.stringify(requestHeaders, null, 2))
+  console.log(`[qqbot-api:${requestId}] >>> Body:`, JSON.stringify({ appId, clientSecret: "***" }, null, 2))
 
-  let response: Response
-  try {
-    response = await fetch(TOKEN_URL, {
-      method: "POST",
-      headers: requestHeaders,
-      body: JSON.stringify(requestBody),
+  for (let attempt = 0; attempt <= NETWORK_RETRY_DELAYS_MS.length; attempt += 1) {
+    let response: Response
+    try {
+      response = await fetch(TOKEN_URL, {
+        method: "POST",
+        headers: attempt === 0 ? requestHeaders : { ...requestHeaders, Connection: "close" },
+        body: JSON.stringify(requestBody),
+      })
+    } catch (err) {
+      const detail = describeNetworkError(err)
+      console.error(`[qqbot-api:${requestId}] <<< Network error attempt=${attempt + 1}: ${detail}`)
+      if (attempt < NETWORK_RETRY_DELAYS_MS.length && isTransientNetworkError(detail)) {
+        await retryDelay(requestId, attempt, detail)
+        continue
+      }
+      throw new Error(`Network error getting access_token request=${requestId}: ${detail}`)
+    }
+
+    const responseHeaders: Record<string, string> = {}
+    response.headers.forEach((value, key) => {
+      responseHeaders[key] = value
     })
-  } catch (err) {
-    console.error("[qqbot-api] <<< Network error:", err)
-    throw new Error(`Network error getting access_token: ${err instanceof Error ? err.message : String(err)}`)
+    console.log(`[qqbot-api:${requestId}] <<< Status attempt=${attempt + 1}: ${response.status} ${response.statusText}`)
+    console.log(`[qqbot-api:${requestId}] <<< Headers:`, JSON.stringify(responseHeaders, null, 2))
+
+    let data: { access_token?: string; expires_in?: number }
+    try {
+      const rawBody = await response.text()
+      const logBody = rawBody.replace(/"access_token"\s*:\s*"[^"]+"/g, '"access_token": "***"')
+      console.log(`[qqbot-api:${requestId}] <<< Body:`, logBody)
+      data = JSON.parse(rawBody) as { access_token?: string; expires_in?: number }
+    } catch (err) {
+      const detail = describeNetworkError(err)
+      console.error(`[qqbot-api:${requestId}] <<< Response body error attempt=${attempt + 1}: ${detail}`)
+      if (response.ok && attempt < NETWORK_RETRY_DELAYS_MS.length && isTransientNetworkError(detail)) {
+        await retryDelay(requestId, attempt, detail)
+        continue
+      }
+      throw new Error(`Failed to parse access_token response request=${requestId}: ${detail}`)
+    }
+
+    if (!response.ok || !data.access_token) {
+      const detail = JSON.stringify(data)
+      if (response.status >= 500 && attempt < NETWORK_RETRY_DELAYS_MS.length) {
+        await retryDelay(requestId, attempt, `HTTP ${response.status}: ${detail}`)
+        continue
+      }
+      throw new Error(`Failed to get access_token request=${requestId}: ${detail}`)
+    }
+
+    const cachedToken = {
+      token: data.access_token,
+      expiresAt: Date.now() + (data.expires_in ?? 7200) * 1000,
+    }
+    cachedTokens.set(appId, cachedToken)
+
+    console.log(`[qqbot-api:${requestId}] Token cached for appId=${appId}, expires at: ${new Date(cachedToken.expiresAt).toISOString()}`)
+    return cachedToken.token
   }
 
-  const responseHeaders: Record<string, string> = {}
-  response.headers.forEach((value, key) => {
-    responseHeaders[key] = value
-  })
-  console.log(`[qqbot-api] <<< Status: ${response.status} ${response.statusText}`)
-  console.log("[qqbot-api] <<< Headers:", JSON.stringify(responseHeaders, null, 2))
-
-  let data: { access_token?: string; expires_in?: number }
-  let rawBody: string
-  try {
-    rawBody = await response.text()
-    const logBody = rawBody.replace(/"access_token"\s*:\s*"[^"]+"/g, '"access_token": "***"')
-    console.log("[qqbot-api] <<< Body:", logBody)
-    data = JSON.parse(rawBody) as { access_token?: string; expires_in?: number }
-  } catch (err) {
-    console.error("[qqbot-api] <<< Parse error:", err)
-    throw new Error(`Failed to parse access_token response: ${err instanceof Error ? err.message : String(err)}`)
-  }
-
-  if (!data.access_token) {
-    throw new Error(`Failed to get access_token: ${JSON.stringify(data)}`)
-  }
-
-  const cachedToken = {
-    token: data.access_token,
-    expiresAt: Date.now() + (data.expires_in ?? 7200) * 1000,
-  }
-  cachedTokens.set(appId, cachedToken)
-
-  console.log(`[qqbot-api] Token cached for appId=${appId}, expires at: ${new Date(cachedToken.expiresAt).toISOString()}`)
-  return cachedToken.token
+  throw new Error(`Token retries exhausted request=${requestId}`)
 }
 
 /**

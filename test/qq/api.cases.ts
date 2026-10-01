@@ -60,6 +60,25 @@ afterEach(() => {
 })
 
 describe("getAccessToken per App ID", () => {
+  test("retries a transient TLS verification failure with a fresh connection", async () => {
+    const calls: RequestInit[] = []
+    spyOn(globalThis, "fetch").mockImplementation((_input, init) => {
+      calls.push(init ?? {})
+      if (calls.length === 1) {
+        const error = new TypeError("unknown certificate verification error") as TypeError & { code?: string }
+        error.code = "UNKNOWN_CERTIFICATE_VERIFICATION_ERROR"
+        return Promise.reject(error)
+      }
+      return Promise.resolve(tokenResponse("recovered-token"))
+    })
+
+    const token = await getAccessToken(BOT_A.appId, BOT_A.clientSecret)
+
+    expect(token).toBe("recovered-token")
+    expect(calls).toHaveLength(2)
+    expect(new Headers(calls[1]!.headers).get("connection")).toBe("close")
+  })
+
   test("keeps each App ID token cached when another bot fetches", async () => {
     // Given
     const requestedAppIds = recordTokenRequests()
