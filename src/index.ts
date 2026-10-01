@@ -238,7 +238,7 @@ async function main(): Promise<void> {
     const hasActiveRequests = bridges.some((currentBridge) => currentBridge.hasActiveRequests())
 
     try {
-      await healthCheck(client, 5_000)
+      await healthCheck(client, 5_000, true)
       consecutiveFailures = 0
       if (hasActiveRequests && router?.isStale(2 * 60 * 1000)) {
         router.forceReconnect("no SSE event while a request is active for 2 minutes")

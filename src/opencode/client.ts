@@ -16,14 +16,14 @@ export function getClient(): OpencodeClient {
   return client
 }
 
-export async function healthCheck(oc: OpencodeClient, timeoutMs = 5000): Promise<void> {
+export async function healthCheck(oc: OpencodeClient, timeoutMs = 5000, quiet = false): Promise<void> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
 
   try {
-    console.log("[client] Running health check...")
+    if (!quiet) console.log("[client] Running health check...")
     const result = await oc.session.list({ signal: controller.signal })
-    console.log("[client] Health check passed, sessions:", result.data?.length)
+    if (!quiet) console.log("[client] Health check passed, sessions:", result.data?.length)
     clearTimeout(timeout)
   } catch (err) {
     clearTimeout(timeout)
