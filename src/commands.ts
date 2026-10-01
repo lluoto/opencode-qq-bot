@@ -11,6 +11,9 @@ import { SessionManager } from "./opencode/sessions.js"
 import { deriveStateKey } from "./state-key.js"
 
 const SELECTION_TTL_MS = 60_000
+const COMPACTION_TIMEOUT_MS = 2 * 60_000
+const COMPACTION_POLL_MS = 500
+const COMPACTION_START_GRACE_MS = 2_000
 const COMMAND_PREFIX_RE = /^[\\/]/
 
 export interface CommandContext {
@@ -184,7 +187,28 @@ async function handleCompact(ctx: MessageContext, cmdCtx: CommandContext): Promi
   }
 
   await cmdCtx.client.session.summarize({ path: { id: session.sessionId } })
-  return `已请求压缩当前会话：${session.title ?? session.sessionId}`
+  await waitForCompaction(cmdCtx.client, session.sessionId)
+  return `已完成压缩当前会话：${session.title ?? session.sessionId}`
+}
+
+async function waitForCompaction(client: OpencodeClient, sessionId: string): Promise<void> {
+  const deadline = Date.now() + COMPACTION_TIMEOUT_MS
+  const startGraceDeadline = Date.now() + COMPACTION_START_GRACE_MS
+  let observedCompacting = false
+  while (Date.now() < deadline) {
+    const current = await client.session.get({ path: { id: sessionId } })
+    if (current.data?.time.compacting) {
+      observedCompacting = true
+    } else if (observedCompacting || Date.now() >= startGraceDeadline) {
+      return
+    } else {
+      // The server can publish compacting shortly after accepting summarize; do not let an
+      // initially-idle status release the next prompt before this observation window closes.
+      await new Promise((resolve) => setTimeout(resolve, COMPACTION_POLL_MS))
+    }
+    await new Promise((resolve) => setTimeout(resolve, COMPACTION_POLL_MS))
+  }
+  throw new Error("会话压缩超过 2 分钟仍未完成")
 }
 
 async function handleStatus(ctx: MessageContext, cmdCtx: CommandContext): Promise<string> {

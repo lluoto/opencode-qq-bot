@@ -96,12 +96,17 @@ describe("session compaction", () => {
         return { data: true }
       },
     })
+    let getCalls = 0
+    Object.defineProperty(client.session, "get", {
+      value: async () => ({ data: { time: getCalls++ === 0 ? { compacting: Date.now() } : {} } }),
+    })
     const context = createModelCommandContext(client)
 
     const result = await handleCommand({ ...modelContext, content: "/compact" }, context)
 
     expect(calls).toEqual([{ path: { id: "session-1" } }])
-    expect(result).toBe("已请求压缩当前会话：Test session")
+    expect(getCalls).toBe(2)
+    expect(result).toBe("已完成压缩当前会话：Test session")
   })
 
   test("rejects compaction when no session is active", async () => {
