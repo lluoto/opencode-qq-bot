@@ -62,7 +62,7 @@ export function createBridge(
   sessions: SessionManager,
   botConfig?: { appId: string; clientSecret: string; sandbox: boolean },
 ): Bridge {
-  const busyUsers = new Set<string>()
+  const busySessions = new Set<string>()
   const activeControllers = new Map<string, AbortController>()
   const pendingSelections = new Map<string, PendingSelection>()
   const pendingQuestions = new Map<string, PendingQuestion>()
@@ -78,8 +78,8 @@ export function createBridge(
     sessions,
     getAccessToken: () => getAccessToken(botAppId, botClientSecret),
     pendingSelections,
-    stopActiveRequest: (stateKey) => {
-      const controller = activeControllers.get(stateKey)
+    stopActiveRequest: (sessionId) => {
+      const controller = activeControllers.get(sessionId)
       controller?.abort()
       return controller !== undefined
     },
@@ -88,14 +88,13 @@ export function createBridge(
   const forwardQuestionToQQ = async (ctx: MessageContext, pending: PendingQuestion): Promise<void> => {
     if (forwardedQuestionIds.has(pending.requestId)) return
     forwardedQuestionIds.add(pending.requestId)
-    const stateKey = deriveStateKey(ctx.botId, ctx.userId, ctx.groupId)
-    pendingQuestions.set(stateKey, pending)
+    pendingQuestions.set(pending.sessionId, pending)
     try {
       await sendReply(ctx, formatQuestionPrompt(pending))
     } catch (error) {
       forwardedQuestionIds.delete(pending.requestId)
-      if (pendingQuestions.get(stateKey)?.requestId === pending.requestId) {
-        pendingQuestions.delete(stateKey)
+      if (pendingQuestions.get(pending.sessionId)?.requestId === pending.requestId) {
+        pendingQuestions.delete(pending.sessionId)
       }
       throw error
     }
@@ -156,9 +155,10 @@ export function createBridge(
 
       if (isCommand(content)) {
         if (/^[\\/](?:stop|x)(?:\s|$)/i.test(content)) {
-          const pendingQuestion = pendingQuestions.get(stateKey)
+          const sessionId = sessions.getSession(ctx.userId)?.sessionId
+          const pendingQuestion = sessionId ? pendingQuestions.get(sessionId) : undefined
           if (pendingQuestion) {
-            pendingQuestions.delete(stateKey)
+            pendingQuestions.delete(sessionId!)
             void rejectQuestion(config.opencode.baseUrl, pendingQuestion.requestId).catch((error) => {
               console.error("[bridge] failed to reject pending question:", error)
             })
@@ -173,7 +173,7 @@ export function createBridge(
 
       const questionReply = await maybeHandlePendingQuestion(
         ctx,
-        stateKey,
+        sessions.getSession(ctx.userId)?.sessionId,
         pendingQuestions,
         config.opencode.baseUrl,
       )
@@ -188,21 +188,21 @@ export function createBridge(
         return
       }
 
-      if (busyUsers.has(stateKey)) {
-        await sendReply(ctx, "上一条消息还在处理中，请稍候再试")
+      let processingTimer: ReturnType<typeof setTimeout> | null = null
+      let promptModel: PromptOptions["model"] | undefined
+      let session = await sessions.getOrCreate(ctx.userId)
+      let activeSessionId = session.sessionId
+      if (busySessions.has(activeSessionId)) {
+        await sendReply(ctx, "当前会话仍在处理中；可先切换到另一会话继续操作")
         return
       }
 
-      busyUsers.add(stateKey)
+      busySessions.add(activeSessionId)
       const abortController = new AbortController()
-      activeControllers.set(stateKey, abortController)
-
-      let processingTimer: ReturnType<typeof setTimeout> | null = null
-      let promptModel: PromptOptions["model"] | undefined
+      activeControllers.set(activeSessionId, abortController)
       try {
         let sentProcessingReply = false
 
-        let session = await sessions.getOrCreate(ctx.userId)
         sessionContexts.set(session.sessionId, ctx)
         const promptOptions = buildPromptOptions(ctx.userId, sessions)
         promptModel = promptOptions.model
@@ -225,6 +225,11 @@ export function createBridge(
           if (isSessionNotFoundError(error)) {
             console.log("[bridge] Session missing, creating a fresh one:", session.sessionId)
             session = await sessions.createNew(ctx.userId)
+            busySessions.delete(activeSessionId)
+            activeControllers.delete(activeSessionId)
+            activeSessionId = session.sessionId
+            busySessions.add(activeSessionId)
+            activeControllers.set(activeSessionId, abortController)
             sessionContexts.set(session.sessionId, ctx)
             replyText = await runOnce(session.sessionId)
           } else {
@@ -253,9 +258,9 @@ export function createBridge(
           await sendReply(ctx, `处理失败：${toUserFacingError(error, promptModel)}`)
         }
       } finally {
-        pendingQuestions.delete(stateKey)
-        busyUsers.delete(stateKey)
-        activeControllers.delete(stateKey)
+        pendingQuestions.delete(activeSessionId)
+        busySessions.delete(activeSessionId)
+        activeControllers.delete(activeSessionId)
       }
     } catch (error) {
       console.error("[bridge] handleMessage failed:", error)
@@ -278,7 +283,7 @@ export function createBridge(
 
   return {
     handleMessage,
-    hasActiveRequests: () => busyUsers.size > 0,
+    hasActiveRequests: () => busySessions.size > 0,
     dispose: () => {
       clearInterval(questionPollTimer)
       unsubscribeQuestionEvents()
@@ -288,16 +293,17 @@ export function createBridge(
 
 async function maybeHandlePendingQuestion(
   ctx: MessageContext,
-  stateKey: string,
+  sessionId: string | undefined,
   pendingQuestions: Map<string, PendingQuestion>,
   baseUrl: string,
 ): Promise<string | null> {
-  const pending = pendingQuestions.get(stateKey)
+  if (!sessionId) return null
+  const pending = pendingQuestions.get(sessionId)
   if (!pending) return null
 
   const question = pending.questions[pending.questionIndex]
   if (!question) {
-    pendingQuestions.delete(stateKey)
+    pendingQuestions.delete(sessionId)
     return null
   }
 
@@ -311,7 +317,7 @@ async function maybeHandlePendingQuestion(
     return formatQuestionPrompt(pending)
   }
 
-  pendingQuestions.delete(stateKey)
+  pendingQuestions.delete(sessionId)
   await replyToQuestion(baseUrl, pending.requestId, pending.answers)
   return "已提交选择，模型继续执行"
 }

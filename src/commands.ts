@@ -23,7 +23,7 @@ export interface CommandContext {
   getAccessToken: () => Promise<string>
   pendingSelections: Map<string, PendingSelection>
   configuredModelIds?: ReadonlySet<string>
-  stopActiveRequest?: (stateKey: string) => boolean
+  stopActiveRequest?: (sessionId: string) => boolean
 }
 
 export interface PendingSelection {
@@ -175,7 +175,7 @@ async function handleStop(ctx: MessageContext, cmdCtx: CommandContext): Promise<
     return "当前还没有会话可停止"
   }
 
-  cmdCtx.stopActiveRequest?.(deriveStateKey(ctx.botId, ctx.userId, ctx.groupId))
+  cmdCtx.stopActiveRequest?.(session.sessionId)
   await cmdCtx.client.session.abort({ path: { id: session.sessionId } })
   return `已停止当前任务：${session.title ?? session.sessionId}`
 }

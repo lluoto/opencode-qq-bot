@@ -21,6 +21,11 @@ mock.module("./qq/api.js", () => ({
 }))
 
 mock.module("./qq/sender.js", () => ({
+  ReplyDeliveryError: class ReplyDeliveryError extends Error {
+    constructor(readonly deliveredChunks: number, cause: unknown) {
+      super(cause instanceof Error ? cause.message : String(cause))
+    }
+  },
   replyToQQ: async (_accessToken: string, _ctx: MessageContext, text: string): Promise<void> => {
     replies.push(text)
   },
@@ -202,7 +207,7 @@ describe("bridge state isolation", () => {
     expect(replies).toHaveLength(2)
   })
 
-  test("tracks concurrent requests independently for each bot", async () => {
+  test("serializes requests that resolve to the same session even with another bot ID", async () => {
     // Given
     const client = createClient()
     const promptRejectors = holdSessionPrompts(client)
@@ -221,15 +226,15 @@ describe("bridge state isolation", () => {
     const firstRequest = bridge.handleMessage(firstMessage)
     await waitForPromptCount(promptRejectors, 1)
     const secondRequest = bridge.handleMessage(secondMessage)
-    await waitForPromptCount(promptRejectors, 2)
+    await waitForPromptCount(promptRejectors, 1)
     const promptCount = promptRejectors.length
     await stopPromptRequests([firstRequest, secondRequest], promptRejectors)
 
     // Then
-    expect(promptCount).toBe(2)
+    expect(promptCount).toBe(1)
   })
 
-  test("replies busy to a second concurrent request in the same bot and C2C scope", async () => {
+  test("replies busy to a second concurrent request in the same session", async () => {
     // Given
     const client = createClient()
     const promptRejectors = holdSessionPrompts(client)
@@ -238,7 +243,7 @@ describe("bridge state isolation", () => {
     const bridge = createBridge(config, client, new EventRouter(client), sessions, bridgeBot)
     const firstMessage = { ...baseMessage, msgId: "same-scope-busy-1", content: "first" } satisfies MessageContext
     const secondMessage = { ...baseMessage, msgId: "same-scope-busy-2", content: "second" } satisfies MessageContext
-    const busyReply = "上一条消息还在处理中，请稍候再试"
+    const busyReply = "当前会话仍在处理中；可先切换到另一会话继续操作"
 
     // When
     const firstRequest = bridge.handleMessage(firstMessage)
@@ -257,7 +262,27 @@ describe("bridge state isolation", () => {
     expect(observed).toEqual({ promptCount: 1, busyReplyCount: 1 })
   })
 
-  test("tracks concurrent C2C and group requests independently for one bot", async () => {
+  test("allows a second request after switching to another session", async () => {
+    const client = createClient()
+    const promptRejectors = holdSessionPrompts(client)
+    const sessions = new SessionManager(client)
+    sessions.switchSession(baseMessage.userId, "session-a", "Session A")
+    const bridge = createBridge(config, client, new EventRouter(client), sessions, bridgeBot)
+    const firstMessage = { ...baseMessage, msgId: "session-a-request", content: "first" } satisfies MessageContext
+    const secondMessage = { ...baseMessage, msgId: "session-b-request", content: "second" } satisfies MessageContext
+
+    const firstRequest = bridge.handleMessage(firstMessage)
+    await waitForPromptCount(promptRejectors, 1)
+    sessions.switchSession(baseMessage.userId, "session-b", "Session B")
+    const secondRequest = bridge.handleMessage(secondMessage)
+    await waitForPromptCount(promptRejectors, 2)
+    const promptCount = promptRejectors.length
+    await stopPromptRequests([firstRequest, secondRequest], promptRejectors)
+
+    expect(promptCount).toBe(2)
+  })
+
+  test("serializes C2C and group requests that share one session", async () => {
     // Given
     const client = createClient()
     const promptRejectors = holdSessionPrompts(client)
@@ -277,12 +302,12 @@ describe("bridge state isolation", () => {
     const c2cRequest = bridge.handleMessage(c2cMessage)
     await waitForPromptCount(promptRejectors, 1)
     const groupRequest = bridge.handleMessage(groupMessage)
-    await waitForPromptCount(promptRejectors, 2)
+    await waitForPromptCount(promptRejectors, 1)
     const promptCount = promptRejectors.length
     await stopPromptRequests([c2cRequest, groupRequest], promptRejectors)
 
     // Then
-    expect(promptCount).toBe(2)
+    expect(promptCount).toBe(1)
   })
 })
 
