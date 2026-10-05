@@ -126,7 +126,7 @@ describe("bridge state isolation", () => {
 
     await bridge.handleMessage({ ...baseMessage, msgId: "recover-final-text", content: "run" })
 
-    expect(replies).toEqual(["recovered assistant text"])
+    expect(replies).toEqual(["[会话：Test session]\nrecovered assistant text"])
   })
 
   test("omits the model override so a selected CLI session keeps its own model", async () => {
@@ -243,7 +243,7 @@ describe("bridge state isolation", () => {
     const bridge = createBridge(config, client, new EventRouter(client), sessions, bridgeBot)
     const firstMessage = { ...baseMessage, msgId: "same-scope-busy-1", content: "first" } satisfies MessageContext
     const secondMessage = { ...baseMessage, msgId: "same-scope-busy-2", content: "second" } satisfies MessageContext
-    const busyReply = "当前会话仍在处理中；可先切换到另一会话继续操作"
+    const busyReply = "[会话：Test session]\n当前会话仍在处理中；可先切换到另一会话继续操作"
 
     // When
     const firstRequest = bridge.handleMessage(firstMessage)
@@ -280,6 +280,29 @@ describe("bridge state isolation", () => {
     await stopPromptRequests([firstRequest, secondRequest], promptRejectors)
 
     expect(promptCount).toBe(2)
+  })
+
+  test("labels final replies from concurrent sessions", async () => {
+    const client = createClient()
+    const resolvers: Array<(result: unknown) => void> = []
+    Object.defineProperty(client.session, "prompt", {
+      value: () => new Promise((resolve) => resolvers.push(resolve)),
+    })
+    const sessions = new SessionManager(client)
+    sessions.switchSession(baseMessage.userId, "session-a", "Session A")
+    const bridge = createBridge(config, client, new EventRouter(client), sessions, bridgeBot)
+
+    const first = bridge.handleMessage({ ...baseMessage, msgId: "label-a", content: "first" })
+    for (let turn = 0; turn < 10 && resolvers.length < 1; turn += 1) await Promise.resolve()
+    sessions.switchSession(baseMessage.userId, "session-b", "Session B")
+    const second = bridge.handleMessage({ ...baseMessage, msgId: "label-b", content: "second" })
+    for (let turn = 0; turn < 10 && resolvers.length < 2; turn += 1) await Promise.resolve()
+    resolvers[1]!({ data: { parts: [{ type: "text", text: "reply B" }] } })
+    resolvers[0]!({ data: { parts: [{ type: "text", text: "reply A" }] } })
+    await Promise.all([first, second])
+
+    expect(replies).toContain("[会话：Session A]\nreply A")
+    expect(replies).toContain("[会话：Session B]\nreply B")
   })
 
   test("serializes C2C and group requests that share one session", async () => {
@@ -342,7 +365,7 @@ describe("bridge command credentials", () => {
     await promptRequest
     await new Promise((resolve) => setTimeout(resolve, 0))
 
-    expect(replies).toEqual(["已停止当前任务：Test session", "late model result"])
+    expect(replies).toEqual(["已停止当前任务：Test session", "[会话：Test session]\nlate model result"])
   })
 
   test("resolves with no result once startPrompt() itself rejects after stop", async () => {
@@ -441,7 +464,7 @@ describe("bridge question forwarding", () => {
     }
     await new Promise((resolve) => setTimeout(resolve, 0))
 
-    expect(replies).toContain("【模型需要选择】 (1/1)\n选择执行方式\n1. 继续\n2. 停止\n回复一个序号；也可直接回复自定义答案。发送 /stop 可中止。")
+    expect(replies).toContain("[会话：Test session]\n【模型需要选择】 (1/1)\n选择执行方式\n1. 继续\n2. 停止\n回复一个序号；也可直接回复自定义答案。发送 /stop 可中止。")
   })
 
   test("forwards a multiple-choice question to QQ and submits the selected labels", async () => {
@@ -490,16 +513,16 @@ describe("bridge question forwarding", () => {
 
       await bridge.handleMessage({ ...baseMessage, msgId: "question-answer", content: "1,2" })
 
-      expect(replies[0]).toContain("【范围】 (1/1)")
+      expect(replies[0]).toContain("[会话：Test session]\n【范围】 (1/1)")
       expect(replies[0]).toContain("多选用逗号分隔")
       expect(fetchCalls).toHaveLength(1)
       expect(fetchCalls[0]?.url).toBe("http://127.0.0.1/question/question-1/reply")
       expect(JSON.parse(String(fetchCalls[0]?.init?.body))).toEqual({ answers: [["核心", "界面"]] })
-      expect(replies).toContain("已提交选择，模型继续执行")
+      expect(replies).toContain("[会话：Test session]\n已提交选择，模型继续执行")
 
       resolvePrompt({ data: { parts: [{ type: "text", text: "continued" }] } })
       await promptRequest
-      expect(replies).toContain("continued")
+      expect(replies).toContain("[会话：Test session]\ncontinued")
     } finally {
       globalThis.fetch = originalFetch
     }
@@ -541,7 +564,7 @@ describe("bridge question forwarding", () => {
       await bridge.handleMessage({ ...baseMessage, msgId: "poll-answer", content: "1" })
       resolvePrompt({ data: { parts: [{ type: "text", text: "done" }] } })
       await promptRequest
-      expect(replies).toContain("done")
+      expect(replies).toContain("[会话：Test session]\ndone")
     } finally {
       globalThis.fetch = originalFetch
     }

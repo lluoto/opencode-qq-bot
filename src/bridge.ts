@@ -67,11 +67,22 @@ export function createBridge(
   const pendingSelections = new Map<string, PendingSelection>()
   const pendingQuestions = new Map<string, PendingQuestion>()
   const sessionContexts = new Map<string, MessageContext>()
+  const sessionLabels = new Map<string, string>()
   const forwardedQuestionIds = new Set<string>()
   const processedMessages = new Map<string, number>()
   const botAppId = botConfig?.appId ?? config.qq.appId
   const botClientSecret = botConfig?.clientSecret ?? config.qq.clientSecret
   const botSandbox = botConfig?.sandbox ?? config.qq.sandbox
+
+  const rememberSessionContext = (session: { sessionId: string; title?: string }, ctx: MessageContext): void => {
+    sessionContexts.set(session.sessionId, ctx)
+    sessionLabels.set(session.sessionId, session.title?.trim() || session.sessionId.slice(0, 8))
+  }
+
+  const formatSessionReply = (sessionId: string, text: string): string => {
+    const label = sessionLabels.get(sessionId) || sessionId.slice(0, 8)
+    return `[会话：${label}]\n${text}`
+  }
   const commandContext: CommandContext = {
     config,
     client,
@@ -90,7 +101,7 @@ export function createBridge(
     forwardedQuestionIds.add(pending.requestId)
     pendingQuestions.set(pending.sessionId, pending)
     try {
-      await sendReply(ctx, formatQuestionPrompt(pending))
+      await sendReply(ctx, formatSessionReply(pending.sessionId, formatQuestionPrompt(pending)))
     } catch (error) {
       forwardedQuestionIds.delete(pending.requestId)
       if (pendingQuestions.get(pending.sessionId)?.requestId === pending.requestId) {
@@ -166,7 +177,7 @@ export function createBridge(
         }
         const reply = await handleCommand(ctx, commandContext)
         const session = sessions.getSession(ctx.userId)
-        if (session) sessionContexts.set(session.sessionId, ctx)
+        if (session) rememberSessionContext(session, ctx)
         await sendReply(ctx, reply)
         return
       }
@@ -178,7 +189,8 @@ export function createBridge(
         config.opencode.baseUrl,
       )
       if (questionReply !== null) {
-        await sendReply(ctx, questionReply)
+        const sessionId = sessions.getSession(ctx.userId)?.sessionId
+        await sendReply(ctx, sessionId ? formatSessionReply(sessionId, questionReply) : questionReply)
         return
       }
 
@@ -193,7 +205,7 @@ export function createBridge(
       let session = await sessions.getOrCreate(ctx.userId)
       let activeSessionId = session.sessionId
       if (busySessions.has(activeSessionId)) {
-        await sendReply(ctx, "当前会话仍在处理中；可先切换到另一会话继续操作")
+        await sendReply(ctx, formatSessionReply(activeSessionId, "当前会话仍在处理中；可先切换到另一会话继续操作"))
         return
       }
 
@@ -203,7 +215,7 @@ export function createBridge(
       try {
         let sentProcessingReply = false
 
-        sessionContexts.set(session.sessionId, ctx)
+        rememberSessionContext(session, ctx)
         const promptOptions = buildPromptOptions(ctx.userId, sessions)
         promptModel = promptOptions.model
         console.log("[bridge] Model override for prompt:", JSON.stringify(promptOptions.model))
@@ -212,7 +224,7 @@ export function createBridge(
           return waitForSessionReply(client, router, sessionId, abortController.signal, config.opencode.baseUrl, () => {
             return startSessionPrompt(client, sessionId, content, promptOptions)
           }, async (progressText) => {
-            await sendReply(ctx, progressText)
+            await sendReply(ctx, formatSessionReply(activeSessionId, progressText))
           }, async (pendingQuestion) => {
             await forwardQuestionToQQ(ctx, pendingQuestion)
           })
@@ -230,7 +242,7 @@ export function createBridge(
             activeSessionId = session.sessionId
             busySessions.add(activeSessionId)
             activeControllers.set(activeSessionId, abortController)
-            sessionContexts.set(session.sessionId, ctx)
+            rememberSessionContext(session, ctx)
             replyText = await runOnce(session.sessionId)
           } else {
             throw error
@@ -242,9 +254,9 @@ export function createBridge(
         processingTimer = null
 
         if (replyText.trim()) {
-          await sendReply(ctx, replyText)
+          await sendReply(ctx, formatSessionReply(activeSessionId, replyText))
         } else if (!sentProcessingReply && !abortController.signal.aborted) {
-          await sendReply(ctx, "(AI 未返回内容)")
+          await sendReply(ctx, formatSessionReply(activeSessionId, "(AI 未返回内容)"))
         }
       } catch (error) {
         if (processingTimer) {
@@ -255,7 +267,7 @@ export function createBridge(
           // an abort error. Both are expected cancellation paths, not user failures.
           console.log("[bridge] Suppressing prompt error after user stop:", error)
         } else {
-          await sendReply(ctx, `处理失败：${toUserFacingError(error, promptModel)}`)
+          await sendReply(ctx, formatSessionReply(activeSessionId, `处理失败：${toUserFacingError(error, promptModel)}`))
         }
       } finally {
         pendingQuestions.delete(activeSessionId)
@@ -534,7 +546,7 @@ async function waitForSessionReply(
       scheduleTimeout()
     }
 
-    const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000
+    const HEARTBEAT_INTERVAL_MS = 10 * 60 * 1000
     let heartbeatId: ReturnType<typeof setInterval> | null = setInterval(() => {
       if (settled) return
       const elapsed = Date.now() - thinkStartTime
