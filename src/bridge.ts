@@ -983,12 +983,13 @@ export function toUserFacingError(error: unknown, model?: PromptOptions["model"]
   const message = toErrorMessage(error)
   const normalized = message.toLowerCase()
   const isFreeModel = model?.providerID === "opencode" && model.modelID === "deepseek-v4-flash-free"
-  const isQuotaError = normalized.includes("quota exceeded") || normalized.includes("quota exhausted") || normalized.includes("rate limit") || normalized.includes("免费额度")
-  if (
-    isQuotaError ||
-    (isFreeModel && (normalized.includes("insufficient balance") || normalized.includes("余额不足")))
-  ) {
+  const isQuotaError = isQuotaRetryMessage(message) || getErrorStatusCode(error) === 429 || getErrorStatusCode(error) === 402
+  if (isFreeModel && isQuotaError) {
     return "免费模型今日额度已用尽，请明天再试"
+  }
+  if (isQuotaError) {
+    const modelLabel = model ? `${model.providerID}/${model.modelID}` : "当前模型"
+    return `模型 ${modelLabel} 的额度或限流已到上限，请稍后重试或使用 /model 切换模型`
   }
   if (normalized.includes("endpoint is unavailable") || normalized.includes("upstream request failed")) {
     return "当前模型上游服务不可用，请稍后重试或切换模型"
@@ -1000,9 +1001,21 @@ export function isQuotaRetryMessage(message: string): boolean {
   const normalized = message.toLowerCase()
   return normalized.includes("quota") ||
     normalized.includes("rate limit") ||
+    normalized.includes("too many requests") ||
+    normalized.includes("usage limit") ||
+    normalized.includes("limit reached") ||
+    normalized.includes("credits exhausted") ||
     normalized.includes("insufficient balance") ||
     normalized.includes("免费额度") ||
     normalized.includes("余额不足")
+}
+
+function getErrorStatusCode(error: unknown): number | undefined {
+  if (!isRecord(error)) return undefined
+  const direct = error.statusCode ?? error.status
+  const nested = isRecord(error.data) ? (error.data.statusCode ?? error.data.status) : undefined
+  const status = nested ?? direct
+  return typeof status === "number" ? status : undefined
 }
 
 // RetryPart (type:"retry") 的 error 是 ApiError: { name:"APIError", data:{ message, statusCode?, isRetryable } }。

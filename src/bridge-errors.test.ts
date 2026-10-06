@@ -11,13 +11,13 @@ describe("toUserFacingError", () => {
     })).toBe("免费模型今日额度已用尽，请明天再试")
   })
 
-  test("preserves paid-model balance errors", () => {
+  test("maps paid-model balance errors to model quota guidance", () => {
     const error = { data: { message: "Insufficient Balance", statusCode: 402 } }
 
     expect(toUserFacingError(error, {
       providerID: "deepseek",
       modelID: "deepseek-v4-pro",
-    })).toBe("Insufficient Balance")
+    })).toBe("模型 deepseek/deepseek-v4-pro 的额度或限流已到上限，请稍后重试或使用 /model 切换模型")
   })
 
   test("preserves unrelated errors", () => {
@@ -31,6 +31,13 @@ describe("toUserFacingError", () => {
 
   test("recognizes the free-model rate-limit retry state", () => {
     expect(isQuotaRetryMessage("Rate limit exceeded. Please try again later.")).toBe(true)
+  })
+
+  test("maps HTTP 429 quota responses even when their message is generic", () => {
+    expect(toUserFacingError({ data: { message: "Request rejected", statusCode: 429 } }, {
+      providerID: "anthropic",
+      modelID: "claude-sonnet",
+    })).toBe("模型 anthropic/claude-sonnet 的额度或限流已到上限，请稍后重试或使用 /model 切换模型")
   })
 })
 
