@@ -213,8 +213,6 @@ export function createBridge(
       const abortController = new AbortController()
       activeControllers.set(activeSessionId, abortController)
       try {
-        let sentProcessingReply = false
-
         rememberSessionContext(session, ctx)
         const promptOptions = buildPromptOptions(ctx.userId, sessions)
         promptModel = promptOptions.model
@@ -255,8 +253,6 @@ export function createBridge(
 
         if (replyText.trim()) {
           await sendReply(ctx, formatSessionReply(activeSessionId, replyText))
-        } else if (!sentProcessingReply && !abortController.signal.aborted) {
-          await sendReply(ctx, formatSessionReply(activeSessionId, "(AI 未返回内容)"))
         }
       } catch (error) {
         if (processingTimer) {
@@ -550,6 +546,7 @@ async function waitForSessionReply(
 
     const HEARTBEAT_INTERVAL_MS = 10 * 60 * 1000
     let heartbeatId: ReturnType<typeof setInterval> | null = null
+    let idleWithoutContentCount = 0
 
     const finish = (done: () => void): void => {
       if (settled) {
@@ -589,21 +586,27 @@ async function waitForSessionReply(
         const response = await client.session.status()
         status = response.data?.[sessionId]?.type || "未知"
         if (status === "idle") {
-          const recovered = await getLatestAssistantText(client, sessionId)
-          if (!settled) {
-            if (recovered) latestText = recovered
-            finish(() => resolve(recovered || "(AI 未返回内容)"))
+          const recovered = await getLatestAssistantContent(client, sessionId)
+          if (recovered && !settled) {
+            latestText = recovered
+            finish(() => resolve(recovered))
+            return
           }
-          return
+          idleWithoutContentCount += 1
+        } else {
+          idleWithoutContentCount = 0
         }
       } catch (error) {
         console.warn("[bridge] session liveness probe failed:", error)
         status = "探活失败"
       }
       const silenceMinutes = Math.floor((Date.now() - lastActivityAt) / 60000)
+      const stalled = idleWithoutContentCount >= 3
+        ? `；连续 ${idleWithoutContentCount} 次 idle 且未见新内容，可能卡死，请发送 /stop 或切换会话`
+        : ""
       const body = latestText.trim()
-        ? `${latestText}\n\n[运行中 +${ts}；会话状态 ${status}；距上次事件 ${silenceMinutes} 分钟]`
-        : `[运行中 +${ts}；会话状态 ${status}；距上次事件 ${silenceMinutes} 分钟]`
+        ? `${latestText}\n\n[运行中 +${ts}；会话状态 ${status}；距上次事件 ${silenceMinutes} 分钟${stalled}]`
+        : `[运行中 +${ts}；会话状态 ${status}；距上次事件 ${silenceMinutes} 分钟${stalled}]`
       try {
         await onProgress(formatProgress(body))
       } catch (error) {
@@ -862,13 +865,17 @@ async function waitForSessionReply(
         // Use extracted text directly from prompt result (SSE events are unreliable)
         let finalText = extracted.trim() || latestText.trim() || getBestAccumulatedText().trim()
         if (!finalText) {
-          finalText = await getLatestAssistantText(client, sessionId)
+            finalText = await getLatestAssistantContent(client, sessionId)
           if (finalText) {
             console.log("[bridge] Using latest assistant message text")
           }
         }
         console.log("[bridge] Final text length:", finalText.length)
-        finish(() => resolve(finalText || "(AI 未返回内容)"))
+        if (!finalText) {
+          console.warn("[bridge] Prompt completed without assistant content; waiting for session liveness probe")
+          return
+        }
+        finish(() => resolve(finalText))
       })
       .catch((error) => {
         console.error("[bridge] startPrompt threw:", error)
@@ -977,7 +984,7 @@ export function getPromptError(result: unknown): unknown {
   return response.error ?? response.data?.error ?? response.data?.info?.error
 }
 
-async function getLatestAssistantText(client: OpencodeClient, sessionId: string): Promise<string> {
+async function getLatestAssistantContent(client: OpencodeClient, sessionId: string): Promise<string> {
   try {
     const result = await client.session.messages({ path: { id: sessionId }, query: { limit: 20 } })
     const messages = Array.isArray(result.data) ? result.data : []
@@ -986,7 +993,7 @@ async function getLatestAssistantText(client: OpencodeClient, sessionId: string)
       if (message?.info?.role !== "assistant") continue
       const parts = Array.isArray(message.parts) ? message.parts : []
       const text = parts
-        .filter((part: any) => part?.type === "text" && typeof part.text === "string" && part.text.trim())
+        .filter((part: any) => (part?.type === "text" || part?.type === "reasoning") && typeof part.text === "string" && part.text.trim())
         .map((part: any) => part.text)
         .join("\n")
       if (text.trim()) return text

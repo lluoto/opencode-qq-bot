@@ -129,6 +129,28 @@ describe("bridge state isolation", () => {
     expect(replies).toEqual(["[会话：Test session]\nrecovered assistant text"])
   })
 
+  test("uses the latest assistant reasoning when no text part is available", async () => {
+    const client = createClient()
+    Object.defineProperty(client.session, "prompt", {
+      value: async () => ({ data: { parts: [] } }),
+    })
+    Object.defineProperty(client.session, "messages", {
+      value: async () => ({
+        data: [{
+          info: { role: "assistant" },
+          parts: [{ type: "reasoning", text: "已完成资料核对" }],
+        }],
+      }),
+    })
+    const sessions = new SessionManager(client)
+    sessions.switchSession(baseMessage.userId, "session-1", "Test session")
+    const bridge = createBridge(config, client, new EventRouter(client), sessions, bridgeBot)
+
+    await bridge.handleMessage({ ...baseMessage, msgId: "recover-reasoning", content: "run" })
+
+    expect(replies).toEqual(["[会话：Test session]\n已完成资料核对"])
+  })
+
   test("omits the model override so a selected CLI session keeps its own model", async () => {
     const client = createClient()
     const promptBodies = capturePromptBodies(client)
