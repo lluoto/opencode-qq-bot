@@ -454,6 +454,7 @@ async function waitForSessionReply(
   let connectRetryCount = 0
   let lastProgressText = ""
   let lastProgressAt = 0
+  let lastActivityAt = Date.now()
   let thinkCount = 0
   const forwardedQuestionIds = new Set<string>()
   const thinkStartTime = Date.now()
@@ -543,29 +544,12 @@ async function waitForSessionReply(
 
     const noteActivity = (): void => {
       timeoutCount = 0
+      lastActivityAt = Date.now()
       scheduleTimeout()
     }
 
     const HEARTBEAT_INTERVAL_MS = 10 * 60 * 1000
-    let heartbeatId: ReturnType<typeof setInterval> | null = setInterval(() => {
-      if (settled) return
-      const elapsed = Date.now() - thinkStartTime
-      const mins = Math.floor(elapsed / 60000)
-      const secs = Math.floor((elapsed % 60000) / 1000)
-      const ts = `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
-
-      if (onProgress) {
-        if (latestText.trim()) {
-          void onProgress(formatProgress(`${latestText}\n\n[运行中 +${ts}]`)).catch((error) => {
-            console.warn("[bridge] failed to send heartbeat progress:", error)
-          })
-        } else {
-          void onProgress(formatProgress(`[运行中 +${ts} — 等待模型响应...]`)).catch((error) => {
-            console.warn("[bridge] failed to send heartbeat progress:", error)
-          })
-        }
-      }
-    }, HEARTBEAT_INTERVAL_MS)
+    let heartbeatId: ReturnType<typeof setInterval> | null = null
 
     const finish = (done: () => void): void => {
       if (settled) {
@@ -593,6 +577,40 @@ async function waitForSessionReply(
       console.log("[bridge] Session finished with text:", latestText.substring(0, 200))
       done()
     }
+
+    const heartbeat = async (): Promise<void> => {
+      if (settled || !onProgress) return
+      const elapsed = Date.now() - thinkStartTime
+      const mins = Math.floor(elapsed / 60000)
+      const secs = Math.floor((elapsed % 60000) / 1000)
+      const ts = `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+      let status = "未知"
+      try {
+        const response = await client.session.status()
+        status = response.data?.[sessionId]?.type || "未知"
+        if (status === "idle") {
+          const recovered = await getLatestAssistantText(client, sessionId)
+          if (!settled) {
+            if (recovered) latestText = recovered
+            finish(() => resolve(recovered || "(AI 未返回内容)"))
+          }
+          return
+        }
+      } catch (error) {
+        console.warn("[bridge] session liveness probe failed:", error)
+        status = "探活失败"
+      }
+      const silenceMinutes = Math.floor((Date.now() - lastActivityAt) / 60000)
+      const body = latestText.trim()
+        ? `${latestText}\n\n[运行中 +${ts}；会话状态 ${status}；距上次事件 ${silenceMinutes} 分钟]`
+        : `[运行中 +${ts}；会话状态 ${status}；距上次事件 ${silenceMinutes} 分钟]`
+      try {
+        await onProgress(formatProgress(body))
+      } catch (error) {
+        console.warn("[bridge] failed to send heartbeat progress:", error)
+      }
+    }
+    heartbeatId = setInterval(() => { void heartbeat() }, HEARTBEAT_INTERVAL_MS)
 
     const stop = (): void => {
       if (settled) return
