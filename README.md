@@ -135,7 +135,9 @@ MAX_REPLY_LENGTH=3000
 | `/stop` | 停止当前 AI 运行 |
 | `/compact` | 压缩当前会话上下文 |
 | `/status` | 查看服务器和当前会话状态 |
-| `/sessions` | 列出历史会话，回复序号切换 |
+| `/sessions` / `/ss` | 分页列出全部历史会话，回复当前页序号切换 |
+| `/sessions <页码>` | 查看指定页的历史会话 |
+| `/sunlogin` | 启动向日葵远程控制（需独立授权） |
 | `/help` | 查看帮助 |
 | `/model` | 列出可用模型，回复序号切换 |
 | `/model <provider/model>` | 直接切换到指定模型 |
@@ -241,6 +243,8 @@ OpenCode 需要权限确认
 | `OPENCODE_DEFAULT_MODEL` | 否 | - | 单 Bot 模式下的默认模型，格式 `provider/model` |
 | `QQ_BOTS_JSON` | 否 | - | 多 Bot 配置 JSON；填写后会忽略单 Bot 的 `QQ_APP_ID/QQ_APP_SECRET` |
 | `ALLOWED_USERS` | 否 | (不限制) | 允许使用的 QQ 用户 ID，逗号分隔 |
+| `SUNLOGIN_ALLOWED_USERS` | 是（使用 `/sunlogin` 时） | 空（禁用） | 可启动向日葵的 QQ 虚拟用户 ID，逗号分隔 |
+| `SUNLOGIN_SHORTCUT` | 否 | 公共桌面的向日葵快捷方式 | 向日葵 `.lnk` 文件路径 |
 | `MAX_REPLY_LENGTH` | 否 | `3000` | 单条回复最大字符数 |
 
 ---

@@ -17,6 +17,7 @@ export interface Config {
     externalUrl: boolean
   }
   allowedUsers: string[]
+  sunloginAllowedUsers: string[]
   maxReplyLength: number
 }
 
@@ -70,6 +71,8 @@ export async function ensureConfig(): Promise<void> {
     `OPENCODE_TUI_ATTACH_URL=http://127.0.0.1:4096`,
     `OPENCODE_LOCAL_TOOL_DIR=${join(homedir(), ".local", "share", "opencode", "tool-output")}`,
     `ALLOWED_USERS=`,
+    `# SUNLOGIN_ALLOWED_USERS=`,
+    `# SUNLOGIN_SHORTCUT=${join(process.env.PUBLIC || "C:\\Users\\Public", "Desktop", "向日葵远程控制.lnk")}`,
     `MAX_REPLY_LENGTH=3000`,
   ].join("\n") + "\n"
 
@@ -106,6 +109,10 @@ export function loadConfig(): Config {
   const allowedUsers = allowedRaw
     ? allowedRaw.split(",").map((s: string) => s.trim()).filter(Boolean)
     : []
+  const sunloginAllowedRaw = process.env.SUNLOGIN_ALLOWED_USERS?.trim() ?? ""
+  const sunloginAllowedUsers = sunloginAllowedRaw
+    ? sunloginAllowedRaw.split(",").map((s: string) => s.trim()).filter(Boolean)
+    : []
 
   return {
     qq: {
@@ -118,6 +125,7 @@ export function loadConfig(): Config {
       externalUrl: !!process.env.OPENCODE_BASE_URL?.trim(),
     },
     allowedUsers,
+    sunloginAllowedUsers,
     maxReplyLength: parseInt(process.env.MAX_REPLY_LENGTH ?? "3000", 10),
   }
 }

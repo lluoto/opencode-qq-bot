@@ -17,6 +17,7 @@ const testConfig = {
   qq: { appId: "bot", clientSecret: "secret", sandbox: true },
   opencode: { baseUrl: "http://127.0.0.1", externalUrl: false },
   allowedUsers: [],
+  sunloginAllowedUsers: ["user-1"],
   maxReplyLength: 3000,
 } satisfies Config
 
@@ -123,6 +124,47 @@ describe("session compaction", () => {
     const result = await handleCommand({ ...modelContext, content: "/c" }, context)
 
     expect(result).toBe("当前还没有会话可压缩")
+  })
+})
+
+describe("session pagination", () => {
+  test("lists and selects sessions from a requested page", async () => {
+    const client = createClient()
+    Object.defineProperty(client.session, "list", {
+      value: async () => ({ data: Array.from({ length: 23 }, (_, index) => ({ id: `session-${index + 1}`, title: `Session ${index + 1}` })) }),
+    })
+    const context = createModelCommandContext(client)
+
+    const listing = await handleCommand({ ...modelContext, content: "/ss 2" }, context)
+    const selected = await handlePendingSelection(modelContext, 1, context)
+
+    expect(listing).toContain("会话列表：第 2/3 页，共 23 个")
+    expect(listing).toContain("1. Session 11")
+    expect(listing).toContain("10. Session 20")
+    expect(selected).toBe("已切换到会话：Session 11")
+    expect(context.sessions.getSession(modelContext.userId)?.sessionId).toBe("session-11")
+  })
+})
+
+describe("Sunlogin launcher", () => {
+  test("launches only for the dedicated allowlisted user", async () => {
+    let launches = 0
+    const context = createModelCommandContext()
+    context.launchSunlogin = async () => { launches += 1 }
+
+    const result = await handleCommand({ ...modelContext, content: "/sunlogin" }, context)
+
+    expect(result).toBe("已启动向日葵")
+    expect(launches).toBe(1)
+  })
+
+  test("rejects users outside the dedicated Sunlogin allowlist", async () => {
+    const context = createModelCommandContext()
+    context.launchSunlogin = async () => { throw new Error("should not launch") }
+
+    const result = await handleCommand({ ...modelContext, userId: "other-user", content: "/sunlogin" }, context)
+
+    expect(result).toBe("向日葵启动未授权")
   })
 })
 

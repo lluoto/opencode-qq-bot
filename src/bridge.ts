@@ -17,6 +17,7 @@ import {
   type PendingSelection,
 } from "./commands.js"
 import { deriveStateKey } from "./state-key.js"
+import { launchSunlogin } from "./sunlogin.js"
 
 const RESPONSE_TIMEOUT_MS = 2 * 60 * 1000
 
@@ -94,6 +95,7 @@ export function createBridge(
       controller?.abort()
       return controller !== undefined
     },
+    launchSunlogin,
   }
 
   const forwardQuestionToQQ = async (ctx: MessageContext, pending: PendingQuestion): Promise<void> => {

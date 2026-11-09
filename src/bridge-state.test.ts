@@ -37,6 +37,7 @@ const config = {
   qq: { appId: "global-bot", clientSecret: "global-secret", sandbox: true },
   opencode: { baseUrl: "http://127.0.0.1", externalUrl: false },
   allowedUsers: [],
+  sunloginAllowedUsers: [],
   maxReplyLength: 3000,
 } satisfies Config
 

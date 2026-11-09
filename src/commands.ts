@@ -24,6 +24,7 @@ export interface CommandContext {
   pendingSelections: Map<string, PendingSelection>
   configuredModelIds?: ReadonlySet<string>
   stopActiveRequest?: (sessionId: string) => boolean
+  launchSunlogin?: () => Promise<void>
 }
 
 export interface PendingSelection {
@@ -80,7 +81,9 @@ export async function handleCommand(ctx: MessageContext, cmdCtx: CommandContext)
       return handleStatus(ctx, cmdCtx)
     case "sessions":
     case "ss":
-      return handleSessions(ctx, cmdCtx)
+      return handleSessions(ctx, parsed.args, cmdCtx)
+    case "sunlogin":
+      return handleSunlogin(ctx, cmdCtx)
     case "help":
     case "h":
       return buildHelpText()
@@ -229,26 +232,39 @@ async function handleStatus(ctx: MessageContext, cmdCtx: CommandContext): Promis
   ].join("\n")
 }
 
-async function handleSessions(ctx: MessageContext, cmdCtx: CommandContext): Promise<string> {
+async function handleSessions(ctx: MessageContext, args: string, cmdCtx: CommandContext): Promise<string> {
   const stateKey = deriveStateKey(ctx.botId, ctx.userId, ctx.groupId)
   const sessions = await listSessions(cmdCtx.client)
   if (sessions.length === 0) {
     return "当前没有可切换的历史会话"
   }
 
+  const requestedPage = args ? Number(args) : 1
+  if (!Number.isInteger(requestedPage) || requestedPage < 1) return "用法：/sessions [页码]"
+  const pageSize = 10
+  const pageCount = Math.max(1, Math.ceil(sessions.length / pageSize))
+  if (requestedPage > pageCount) return `页码无效，请使用 1-${pageCount}`
+  const visible = sessions.slice((requestedPage - 1) * pageSize, requestedPage * pageSize)
   const currentSessionId = cmdCtx.sessions.getSession(ctx.userId)?.sessionId
   cmdCtx.pendingSelections.set(stateKey, {
     type: "session",
-    items: sessions.map((session) => ({ id: session.id, label: session.title })),
+    items: visible.map((session) => ({ id: session.id, label: session.title })),
     expiresAt: Date.now() + SELECTION_TTL_MS,
   })
 
-  const lines = sessions.map((session, index) => {
+  const lines = visible.map((session, index) => {
     const prefix = session.id === currentSessionId ? "[当前] " : ""
     return `${index + 1}. ${prefix}${session.title}`
   })
 
-  return ["会话列表：", ...lines, "回复序号切换会话（60 秒内有效）"].join("\n")
+  return [`会话列表：第 ${requestedPage}/${pageCount} 页，共 ${sessions.length} 个`, ...lines, `回复 1-${visible.length} 切换会话（60 秒内有效）；发送 /sessions <页码> 查看其它会话`].join("\n")
+}
+
+async function handleSunlogin(ctx: MessageContext, cmdCtx: CommandContext): Promise<string> {
+  if (!cmdCtx.config.sunloginAllowedUsers.includes(ctx.userId)) return "向日葵启动未授权"
+  if (!cmdCtx.launchSunlogin) return "向日葵启动未启用"
+  await cmdCtx.launchSunlogin()
+  return "已启动向日葵"
 }
 
 export async function handleModel(ctx: MessageContext, args: string, cmdCtx: CommandContext): Promise<string> {
@@ -444,7 +460,8 @@ export function buildHelpText(): string {
     "/stop (x) - 停止当前 AI 运行",
     "/compact (c) - 压缩当前会话上下文",
     "/status (s) - 查看服务器和会话状态",
-    "/sessions (ss) - 列出历史会话",
+    "/sessions (ss) [页码] - 分页列出历史会话",
+    "/sunlogin - 启动向日葵远程控制（需单独授权）",
     "/help (h) - 查看帮助",
     "/model (m) - 列出可用模型",
     "/model <xxx/yyy> - 切换模型",
